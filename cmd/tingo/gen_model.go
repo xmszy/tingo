@@ -1,0 +1,226 @@
+package main
+
+import (
+	"bytes"
+	"flag"
+	"fmt"
+	"go/format"
+	"os"
+	"path/filepath"
+	"strings"
+	"text/template"
+	"unicode"
+
+	_ "github.com/xmszy/tingo/contrib/drivers/mysql"
+	_ "github.com/xmszy/tingo/contrib/drivers/postgres"
+	_ "github.com/xmszy/tingo/contrib/drivers/sqlite"
+	_ "github.com/xmszy/tingo/contrib/drivers/sqlserver"
+	"github.com/xmszy/tingo/database/tdb"
+)
+
+// runModelGeneration 按约定数据库配置反向生成单层模型。
+func runModelGeneration(args []string) {
+	fs := flag.NewFlagSet("model", flag.ExitOnError)
+	connection := fs.String("connection", "", "连接名称，默认使用 config/database.toml 的 default")
+	driver := fs.String("driver", "", "临时覆盖数据库类型")
+	dsn := fs.String("dsn", "", "临时覆盖数据库连接串")
+	tables := fs.String("tables", "", "要生成的表名，逗号分隔；留空生成全部表")
+	dir := fs.String("dir", "app/model", "模型生成目录")
+	pkg := fs.String("pkg", "model", "模型包名")
+	fs.Usage = func() {
+		fmt.Print(`用法: tingo gen model [选项]
+
+默认读取 config/database.toml 并反向生成 app/model 单层模型。
+
+选项:
+  --connection <name> 使用指定命名连接
+  --tables <list>     表名，逗号分隔；留空表示全部表
+  --dir <path>        生成目录（默认 app/model）
+  --pkg <name>        包名（默认 model）
+  --driver <name>     临时覆盖数据库类型
+  --dsn <dsn>         临时覆盖数据库连接串
+`)
+	}
+	fs.Parse(args)
+
+	appConfig, err := tdb.LoadConfig("config/database.toml")
+	if err != nil {
+		failModelGeneration("读取数据库配置失败", err)
+	}
+	dbConfig, resolveErr := appConfig.Resolve(*connection)
+	if *driver != "" {
+		dbConfig.Driver, dbConfig.Dialect = *driver, *driver
+	}
+	if *dsn != "" {
+		dbConfig.DSN = *dsn
+	}
+	if resolveErr != nil && *dsn == "" {
+		failModelGeneration("数据库连接未配置", resolveErr)
+	}
+	if dbConfig.Driver == "" {
+		dbConfig.Driver, dbConfig.Dialect = "mysql", "mysql"
+	}
+
+	db, err := tdb.Open(dbConfig)
+	if err != nil {
+		failModelGeneration("连接数据库失败", err)
+	}
+	defer db.Close()
+
+	want := splitModelTables(*tables)
+	if len(want) == 0 {
+		want, err = db.Tables()
+		if err != nil {
+			failModelGeneration("列举数据表失败", err)
+		}
+	}
+
+	generated := 0
+	connectionName := *connection
+	if connectionName == "" {
+		connectionName = appConfig.Default
+	}
+	prefix := appConfig.Prefix(connectionName)
+	for _, table := range want {
+		meta, inspectErr := db.InspectTable(table)
+		if inspectErr != nil {
+			fmt.Fprintf(os.Stderr, "跳过表 %s: %v\n", table, inspectErr)
+			continue
+		}
+		generateModelFile(*dir, *pkg, meta, prefix)
+		generated++
+	}
+	fmt.Printf("gen model 完成：%d 张表 -> %s\n", generated, *dir)
+}
+
+func splitModelTables(value string) []string {
+	var tables []string
+	for _, table := range strings.Split(value, ",") {
+		if table = strings.TrimSpace(table); table != "" {
+			tables = append(tables, table)
+		}
+	}
+	return tables
+}
+
+func generateModelFile(dir, pkg string, meta *tdb.TableMeta, prefix string) {
+	modelName := strings.TrimPrefix(meta.Name, prefix)
+	if modelName == "" {
+		modelName = meta.Name
+	}
+	path := filepath.Join(dir, modelName+".go")
+	var out bytes.Buffer
+	if err := generatedModelTemplate.Execute(&out, map[string]any{
+		"Package": pkg,
+		"Struct":  pascalIdentifier(modelName),
+		"Table":   meta.Name,
+		"Columns": meta.Columns,
+	}); err != nil {
+		failModelGeneration("模型模板错误", err)
+	}
+	writeGeneratedModelFile(path, out.String())
+	fmt.Printf("  created  %s\n", path)
+}
+
+func failModelGeneration(message string, err error) {
+	fmt.Fprintf(os.Stderr, "%s: %v\n", message, err)
+	os.Exit(1)
+}
+
+func writeGeneratedModelFile(path, src string) {
+	formatted, err := format.Source([]byte(src))
+	if err != nil {
+		failModelGeneration("格式化模型失败", fmt.Errorf("%s: %w", path, err))
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		failModelGeneration("创建模型目录失败", err)
+	}
+	if err := os.WriteFile(path, formatted, 0o644); err != nil {
+		failModelGeneration("写入模型失败", err)
+	}
+}
+
+// modelColumnGoType 将数据库类型映射为 Go 类型（含可空处理）。
+func modelColumnGoType(c tdb.Column) string {
+	base := strings.ToLower(strings.TrimSpace(c.Type))
+	if base == "tinyint(1)" {
+		if c.Nullable {
+			return "*bool"
+		}
+		return "bool"
+	}
+	if i := strings.IndexAny(base, "( "); i >= 0 {
+		base = base[:i]
+	}
+	var valueType string
+	switch base {
+	case "bool", "boolean":
+		valueType = "bool"
+	case "int", "integer", "tinyint", "smallint", "mediumint", "year":
+		valueType = "int"
+	case "bigint":
+		valueType = "int64"
+	case "unsigned bigint":
+		valueType = "uint64"
+	case "float", "real", "double", "decimal", "numeric", "dec":
+		valueType = "float64"
+	case "blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary":
+		valueType = "[]byte"
+	default:
+		valueType = "string"
+	}
+	if c.Nullable {
+		valueType = "*" + valueType
+	}
+	return valueType
+}
+
+func pascalIdentifier(value string) string {
+	var result strings.Builder
+	for _, part := range strings.Split(value, "_") {
+		if part == "" {
+			continue
+		}
+		runes := []rune(part)
+		runes[0] = unicode.ToUpper(runes[0])
+		result.WriteString(string(runes))
+	}
+	return result.String()
+}
+
+var generatedModelTemplate = template.Must(template.New("model").Funcs(template.FuncMap{
+	"modelColumnGoType": modelColumnGoType,
+	"pascalIdentifier":  pascalIdentifier,
+	"tdbTag": func(column tdb.Column) string {
+		tag := column.Name
+		if column.IsPrimary() {
+			tag += ",pk"
+		}
+		if column.IsAutoIncrement() {
+			tag += ",ai"
+		}
+		return tag
+	},
+}).Parse(`// Code generated by tingo gen model. DO NOT EDIT.
+package {{.Package}}
+
+import (
+	"github.com/xmszy/tingo/database/tdb"
+	t "github.com/xmszy/tingo/frame"
+)
+
+// {{.Struct}} 是表 {{.Table}} 的模型。
+type {{.Struct}} struct {
+{{- range .Columns}}
+	// {{.Name}}{{if .Comment}} {{.Comment}}{{end}}
+	{{pascalIdentifier .Name}} {{modelColumnGoType .}} ` + "`json:\"{{.Name}}\" tdb:\"{{tdbTag .}}\"`" + `
+{{- end}}
+}
+
+func ({{.Struct}}) TableName() string { return "{{.Table}}" }
+
+// New{{.Struct}} 返回使用默认或命名连接的查询模型。
+func New{{.Struct}}(connection ...string) *tdb.Model[{{.Struct}}] {
+	return tdb.NewModel[{{.Struct}}](t.Database(connection...))
+}
+`))

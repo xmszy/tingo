@@ -1,0 +1,15 @@
+/runtime/
+/bin/
+/.bin/
+/all/
+*.test
+*.out
+*.prof
+.idea/
+.vscode/
+.DS_Store
+tingo.exe
+*.exe
+.vscode
+.codebuddy
+demo
