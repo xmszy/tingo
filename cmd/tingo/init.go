@@ -254,6 +254,7 @@ func initCmd(args []string) {
 		}
 		fmt.Printf("  created  %s\n", rel)
 	}
+
 	for _, d := range keepDirs {
 		full := filepath.Join(root, d)
 		if err := os.MkdirAll(full, 0o755); err != nil {

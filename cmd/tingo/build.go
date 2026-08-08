@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/xmszy/tingo/net/thttp"
 	"github.com/xmszy/tingo/os/tenv"
 )
 
@@ -124,6 +125,10 @@ func runCmd(args []string) {
 	watch := fs.Bool("watch", false, "文件变更自动重建并重载（开发模式，零外部依赖）")
 	fs.Parse(args)
 
+	// 与框架一致：先自动加载 .env（及 .env.local），使 SERVER_ADDR 等
+	// 环境变量在构建/运行流程中可见（缺失则忽略）。
+	_ = tenv.Load(".env", ".env.local")
+
 	if *watch {
 		watchRun(*addr, *outDir)
 		return
@@ -146,9 +151,16 @@ func runCmd(args []string) {
 		os.Exit(1)
 	}
 
-	// 优先用 TINGO_ADDR 环境变量，其次命令行 --addr。
-	listen := tenv.Get("TINGO_ADDR", *addr)
-	fmt.Printf("serving on %s (Ctrl+C 退出)\n", listen)
+	// 监听地址优先级与框架一致：SERVER_ADDR > TINGO_ADDR > --addr 默认值（:8080）。
+	// 纯数字端口（如 8081）自动补 ":"。保证这里打印的端口与引擎实际监听端口一致。
+	listen := *addr
+	if v := tenv.Get("SERVER_ADDR", ""); v != "" {
+		listen = v
+	} else if v := tenv.Get("TINGO_ADDR", ""); v != "" {
+		listen = v
+	}
+	listen = thttp.ResolveAddr(listen)
+	fmt.Printf("serving on http://localhost:%s (Ctrl+C 退出)\n", listenAddrURL(listen))
 	run := exec.Command(out)
 	run.Env = append(os.Environ(), "TINGO_ADDR="+listen)
 	run.Stdout = os.Stdout
@@ -173,7 +185,14 @@ func watchRun(addr, outDir string) {
 		os.Exit(1)
 	}
 
-	listen := tenv.Get("TINGO_ADDR", addr)
+	// 与 runCmd 一致的地址解析：SERVER_ADDR > TINGO_ADDR > --addr，纯数字补 ":"。
+	listen := addr
+	if v := tenv.Get("SERVER_ADDR", ""); v != "" {
+		listen = v
+	} else if v := tenv.Get("TINGO_ADDR", ""); v != "" {
+		listen = v
+	}
+	listen = thttp.ResolveAddr(listen)
 	var proc *exec.Cmd
 
 	start := func() bool {
@@ -197,7 +216,7 @@ func watchRun(addr, outDir string) {
 			fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 			return false
 		}
-		fmt.Printf("serving on %s (Ctrl+C 退出，文件变更自动重载)\n", listen)
+		fmt.Printf("serving on http://localhost:%s (Ctrl+C 退出，文件变更自动重载)\n", listenAddrURL(listen))
 		return true
 	}
 
@@ -226,6 +245,24 @@ func watchRun(addr, outDir string) {
 			}
 		}
 	}
+}
+
+// listenAddrURL 把监听地址（如 :8080、0.0.0.0:8080、127.0.0.1:8080）转成
+// 可点击的 localhost URL 片段（如 8080），便于在启动日志里拼接成
+// http://localhost:8080。LAN 地址由框架自身另行打印。
+func listenAddrURL(listen string) string {
+	listen = strings.TrimSpace(listen)
+	if listen == "" {
+		return "8080"
+	}
+	if strings.HasPrefix(listen, ":") {
+		return strings.TrimPrefix(listen, ":")
+	}
+	// 含 host:port 时只取端口部分，统一用 localhost 作为可点击入口。
+	if idx := strings.LastIndex(listen, ":"); idx >= 0 {
+		return listen[idx+1:]
+	}
+	return listen
 }
 
 // changed 返回自上次快照以来项目内 .go 源文件是否发生变更（排除 _test.go 与 vendor）。

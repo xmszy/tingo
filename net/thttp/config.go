@@ -4,28 +4,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-)
-
-// Mode 是服务运行模式。
-type Mode string
-
-// 支持的运行模式。
-const (
-	// ModeDebug 开发模式，输出详细日志与路由表。
-	ModeDebug Mode = "debug"
-	// ModeTest 测试模式。
-	ModeTest Mode = "test"
-	// ModeRelease 生产模式，关闭调试输出。
-	ModeRelease Mode = "release"
+	"github.com/xmszy/tingo/os/tenv"
 )
 
 // Config 是 HTTP 服务配置。
 type Config struct {
 	// Addr 是监听地址，如 :8080。
 	Addr string
-
-	// Mode 是运行模式。
-	Mode Mode
 
 	// ReadTimeout 是读取整个请求的超时。
 	ReadTimeout time.Duration
@@ -69,7 +54,6 @@ type Config struct {
 func defaultConfig() Config {
 	return Config{
 		Addr:                   ":8080",
-		Mode:                   ModeDebug,
 		ReadTimeout:            60 * time.Second,
 		ReadHeaderTimeout:      20 * time.Second,
 		WriteTimeout:           60 * time.Second,
@@ -83,16 +67,18 @@ func defaultConfig() Config {
 	}
 }
 
-// ginMode 将 tingo 模式映射到 gin 模式。
-func (c Config) ginMode() string {
-	switch c.Mode {
-	case ModeRelease:
-		return gin.ReleaseMode
-	case ModeTest:
-		return gin.TestMode
-	default:
+// ginModeFromEnv 由 APP_DEBUG 决定 gin 运行模式：
+// true 对应 gin 的调试模式，否则（含未设置）对应生产模式。
+func ginModeFromEnv() string {
+	if tenv.Get("APP_DEBUG", false) {
 		return gin.DebugMode
 	}
+	return gin.ReleaseMode
+}
+
+// isDebug 返回是否处于调试模式。
+func isDebug() bool {
+	return tenv.Get("APP_DEBUG", false)
 }
 
 /* ------------------------------------------------------------------ */
@@ -104,12 +90,6 @@ type Option func(*Config)
 
 // Addr 设置监听地址。
 func Addr(addr string) Option { return func(c *Config) { c.Addr = addr } }
-
-// WithMode 设置运行模式。
-func WithMode(m Mode) Option { return func(c *Config) { c.Mode = m } }
-
-// Release 切换到生产模式。
-func Release() Option { return func(c *Config) { c.Mode = ModeRelease } }
 
 // ReadTimeout 设置读超时。
 func ReadTimeout(d time.Duration) Option { return func(c *Config) { c.ReadTimeout = d } }

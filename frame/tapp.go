@@ -69,6 +69,12 @@ func init() {
 			}
 		}
 
+		// 非默认、未绑定域名、且未通过 app_map 指定前缀的普通应用，
+		// 按应用名自动挂载到 /应用名，避免与默认应用抢占总根路径 "/"。
+		if !cfg.Default && cfg.Domain == "" && cfg.Prefix == "" {
+			cfg.Prefix = "/" + name
+		}
+
 		return cfg
 	}
 }

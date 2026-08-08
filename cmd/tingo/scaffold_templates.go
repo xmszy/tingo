@@ -24,14 +24,14 @@ func main() {
 
 const tplAppConfig = `# 应用配置。
 name = "{{.Name}}"
-debug = "${APP_DEBUG:-true}"
+debug = "${APP_DEBUG:-false}"
 default_app = "app"
 default_timezone = "Asia/Shanghai"
 
 # HTTP 服务。
 [server]
+# addr 默认值可写为 ":8080" 或纯端口号 "8080"（框架自动补 ":"）。
 addr = "${SERVER_ADDR:-:8080}"
-mode = "${SERVER_MODE:-debug}"     # debug / release / test
 print_routes = true
 read_timeout = "60s"
 read_header_timeout = "20s"
@@ -200,7 +200,7 @@ sweep_interval = "5m"             # 过期条目清扫间隔
 `
 
 const tplEnvExample = `CONFIG_EXT = toml
-APP_DEBUG = true
+APP_DEBUG = false
 
 # 数据库
 DB_TYPE = mysql
@@ -219,9 +219,8 @@ REDIS_DB = 0
 # 多语言
 DEFAULT_LANG = zh-cn
 
-# HTTP 服务
-SERVER_ADDR = :8080
-SERVER_MODE = debug
+# HTTP 服务（端口可只写数字，如 8090，框架自动补 ":"）
+SERVER_ADDR = 8090
 LOG_LEVEL = info
 `
 
@@ -309,10 +308,7 @@ func (*Index) Index(c *t.Ctx) {
 	c.String("hello,Tingo!")
 }
 
-// Think 对应 GET /think
-func (*Index) Think(c *t.Ctx) {
-	c.String("hello, %s!", c.Param("name"))
-}
+
 
 // Hello 对应 GET /hello/:name
 func (*Index) Hello(c *t.Ctx) {
@@ -591,6 +587,11 @@ type = "Html"
 # 读取的日志通道名（Console 模式相关）。
 channel = "trace"
 
+
+# 留空使用框架内置默认模板；如需自定义样式，复制框架内置面板模板（os/ttrace 默认模板）自行修改后配置本项。
+# 模板为 Go text/template 语法，可用字段见 os/ttrace 文档（.CSS/.OpenIcon/.CloseIcon/.Script/.Open/{{"{{range .Tabs}}"}}）。
+file = ""
+
 # 工具栏面板可见性（固定分区：基本/文件/流程/错误/SQL/调试）。
 [panels]
 base = true        # 基本（请求/内存/时间戳/会话）
@@ -601,7 +602,7 @@ sql = true         # SQL 查询（需启用 tdb 日志）
 log = true         # 调试（业务 ttrace.Trace() 记录）
 `
 
-// ── 新增：app/.htaccess，对齐 TP app/.htaccess ──
+// ── 新增：app/.htaccess
 const tplAppHtaccess = `deny from all
 `
 

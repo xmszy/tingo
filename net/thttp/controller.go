@@ -116,6 +116,12 @@ func (r *router) Controller(prefix string, ctrl any) core.Router {
 		httpMethod, action := parseMethodName(mt.Name)
 		p := joinPath(prefix, actionPath(action))
 		r.registerMethod(httpMethod, p, v.Method(i).Interface(), name, mt.Name)
+		// Index 作为索引动作默认映射到控制器根路径（如 /admin），
+		// 这里额外注册一条 /{prefix}/index，让用户也能用完整的
+		// “控制器/方法”写法直接访问（如 /admin/index）。
+		if action == "Index" {
+			r.registerMethod(httpMethod, joinPath(prefix, "/index"), v.Method(i).Interface(), name, mt.Name)
+		}
 	}
 	return r
 }
@@ -194,7 +200,8 @@ func parseMethodName(name string) (httpMethod, action string) {
 }
 
 // actionPath 将动作名转为 URL 路径片段。
-// Index 映射到空串（即控制器根路径），其余按下划线规则转换。
+// Index 映射到空串（即控制器根路径）；Controller 方法还会额外为 Index
+// 注册一条 /index 路径，详见 Controller 中的处理。其余动作按下划线规则转换。
 func actionPath(action string) string {
 	if action == "Index" {
 		return ""

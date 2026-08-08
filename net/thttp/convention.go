@@ -2,6 +2,8 @@ package thttp
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/xmszy/tingo/os/tcfg"
@@ -13,11 +15,6 @@ import (
 func loadConventionConfig(tree tcfg.Reader, cfg *Config) error {
 	if addr := tree.String("app.server.addr"); addr != "" {
 		cfg.Addr = addr
-	}
-	if mode := tree.String("app.server.mode"); mode != "" {
-		cfg.Mode = Mode(mode)
-	} else if tree.Has("app.debug") && !tree.Bool("app.debug", true) {
-		cfg.Mode = ModeRelease
 	}
 	if err := applyDuration(tree, "app.server.read_timeout", &cfg.ReadTimeout); err != nil {
 		return err
@@ -74,12 +71,20 @@ func applyRouteConfig(tree tcfg.Reader, cfg *Config) {
 }
 
 func applyEnvironmentConfig(cfg *Config) {
-	cfg.Addr = tenv.Get("TINGO_ADDR", cfg.Addr)
-	cfg.Mode = Mode(tenv.Get("TINGO_MODE", string(cfg.Mode)))
-	if tenv.Has("APP_DEBUG") && !tenv.Get("APP_DEBUG", true) {
-		cfg.Mode = ModeRelease
-	}
+	cfg.Addr = ResolveAddr(tenv.Get("SERVER_ADDR", tenv.Get("TINGO_ADDR", cfg.Addr)))
 	cfg.PrintRoutes = tenv.Get("TINGO_PRINT_ROUTES", cfg.PrintRoutes)
+}
+
+// ResolveAddr 规整监听地址。允许直接写数字端口（如 "8081"），
+// 自动补 ":" 前缀得到 ":8081"；含 ":" 或为空则原样返回。
+func ResolveAddr(addr string) string {
+	if addr == "" {
+		return addr
+	}
+	if _, err := strconv.Atoi(strings.TrimSpace(addr)); err == nil {
+		return ":" + strings.TrimSpace(addr)
+	}
+	return addr
 }
 
 func applyDuration(tree tcfg.Reader, path string, target *time.Duration) error {
@@ -96,8 +101,5 @@ func applyDuration(tree tcfg.Reader, path string, target *time.Duration) error {
 }
 
 func validateConventionConfig(cfg Config) error {
-	if cfg.Mode != ModeDebug && cfg.Mode != ModeTest && cfg.Mode != ModeRelease {
-		return fmt.Errorf("tingo: unsupported server mode %q", cfg.Mode)
-	}
 	return nil
 }

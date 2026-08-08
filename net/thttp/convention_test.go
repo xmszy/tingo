@@ -18,7 +18,6 @@ func TestConventionConfigAndEnvironmentPriority(t *testing.T) {
 			"debug": false,
 			"server": map[string]any{
 				"addr":            ":8088",
-				"mode":            "release",
 				"print_routes":    true,
 				"read_timeout":    "5s",
 				"trusted_proxies": []any{"127.0.0.1"},
@@ -34,7 +33,7 @@ func TestConventionConfigAndEnvironmentPriority(t *testing.T) {
 	if err := loadConventionConfig(tree, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Addr != ":9090" || cfg.Mode != ModeRelease || !cfg.PrintRoutes {
+	if cfg.Addr != ":9090" || !cfg.PrintRoutes {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	if cfg.ReadTimeout != 5*time.Second || cfg.RedirectTrailingSlash || cfg.HandleMethodNotAllowed {
@@ -78,8 +77,8 @@ func TestConventionConfigRejectsInvalidValues(t *testing.T) {
 
 	cfg = defaultConfig()
 	if err := loadConventionConfig(tcfg.Tree{
-		"app": map[string]any{"server": map[string]any{"mode": "invalid"}},
-	}, &cfg); err == nil {
-		t.Fatal("expected invalid mode error")
+		"app": map[string]any{"server": map[string]any{"read_timeout": "5s"}},
+	}, &cfg); err != nil {
+		t.Fatalf("unexpected error for valid duration: %v", err)
 	}
 }

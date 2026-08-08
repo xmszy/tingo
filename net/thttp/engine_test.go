@@ -46,7 +46,7 @@ func TestEngineOwnsStartupOutput(t *testing.T) {
 		fmt.Fprintf(&output, "%s %s %s %d", method, path, handler, handlers)
 	}
 
-	e := NewWithApp(core.NewApp(), WithMode(ModeDebug))
+	e := NewWithApp(core.NewApp())
 	e.Router().GET("/health", func(c *core.Ctx) { c.String("ok") })
 	if output.Len() != 0 {
 		t.Fatalf("gin debug output leaked through tingo: %s", output.String())
@@ -102,7 +102,7 @@ type echoRes struct {
 
 func TestHandlerSignatures(t *testing.T) {
 	core.ResetApps()
-	e := New(WithMode(ModeTest))
+	e := New()
 	r := e.Router()
 
 	// 1. 原生签名
@@ -200,7 +200,7 @@ func TestMultiApp(t *testing.T) {
 	core.RegisterApp("index", indexApp{})
 	core.RegisterApp("boot", bootApp{booted: &booted})
 
-	e := New(WithMode(ModeTest))
+	e := New()
 
 	cases := []struct{ path, want string }{
 		{"/admin/ping", "admin:admin"},
@@ -242,7 +242,7 @@ func TestAppMiddlewareIsolation(t *testing.T) {
 	core.RegisterApp("alpha", mwApp{tag: "alpha"})
 	core.RegisterApp("beta", mwApp{tag: "beta"})
 
-	e := New(WithMode(ModeTest))
+	e := New()
 
 	if got := do(e, http.MethodGet, "/alpha/t", "").Header().Get("X-App-Tag"); got != "alpha" {
 		t.Fatalf("alpha app got tag %q", got)
@@ -258,8 +258,8 @@ func TestEngineAppIsolation(t *testing.T) {
 	first.RegisterApplication("first", indexApp{})
 	second.RegisterApplication("second", indexApp{})
 
-	firstEngine := NewWithApp(first, WithMode(ModeTest))
-	secondEngine := NewWithApp(second, WithMode(ModeTest))
+	firstEngine := NewWithApp(first)
+	secondEngine := NewWithApp(second)
 
 	if got := do(firstEngine, http.MethodGet, "/ping", "").Body.String(); got != "index:first" {
 		t.Fatalf("first engine response = %q", got)
@@ -283,7 +283,7 @@ func (userCtrl) Create(c *core.Ctx) { c.String("create") }
 
 func TestResourceRoutes(t *testing.T) {
 	core.ResetApps()
-	e := New(WithMode(ModeTest))
+	e := New()
 	e.Router().Resource("/users", userCtrl{})
 
 	cases := []struct {
@@ -319,7 +319,7 @@ func (profileCtrl) UserInfo(c *core.Ctx)   { c.String("user-info") }
 
 func TestControllerConvention(t *testing.T) {
 	core.ResetApps()
-	e := New(WithMode(ModeTest))
+	e := New()
 	e.Router().Controller("/profile", profileCtrl{})
 
 	cases := []struct {
@@ -340,6 +340,11 @@ func TestControllerConvention(t *testing.T) {
 	// GetSetting 注册为 GET，POST 应当不被允许
 	if w := do(e, http.MethodPost, "/profile/setting", ""); w.Code == http.StatusOK {
 		t.Fatal("POST /profile/setting should not be routed to a GET-only action")
+	}
+
+	// Index 同时兼容 /profile/index 这种“控制器/方法”写法
+	if w := do(e, http.MethodGet, "/profile/index", ""); w.Code != http.StatusOK || w.Body.String() != "index" {
+		t.Fatalf("GET /profile/index: got %d %q", w.Code, w.Body.String())
 	}
 }
 
@@ -370,7 +375,7 @@ func TestSnake(t *testing.T) {
 
 func TestNotFoundAndMethodNotAllowed(t *testing.T) {
 	core.ResetApps()
-	e := New(WithMode(ModeTest))
+	e := New()
 	e.Router().GET("/only-get", func(c *core.Ctx) { c.String("ok") })
 
 	w := do(e, http.MethodGet, "/nope", "")
@@ -389,7 +394,7 @@ func TestNotFoundAndMethodNotAllowed(t *testing.T) {
 
 func TestEnableAdmin(t *testing.T) {
 	core.ResetApps()
-	e := New(WithMode(ModeTest))
+	e := New()
 	e.EnableAdmin()
 
 	// 管理端点首页
@@ -448,7 +453,7 @@ func TestConfigureAdminFromTree(t *testing.T) {
 	core.ResetApps()
 
 	// 测试 1：admin.enabled = false 时，不暴露任何 admin 端点
-	e1 := New(WithMode(ModeTest))
+	e1 := New()
 	err := e1.ConfigureAdminFromTree(tcfg.Tree{"admin": tcfg.Tree{"enabled": false}})
 	if err != nil {
 		t.Fatalf("ConfigureAdminFromTree(enabled=false): %v", err)
@@ -460,7 +465,7 @@ func TestConfigureAdminFromTree(t *testing.T) {
 
 	// 测试 2：admin.enabled = true 时，admin 端点可用
 	core.ResetApps()
-	e2 := New(WithMode(ModeTest))
+	e2 := New()
 	err = e2.ConfigureAdminFromTree(tcfg.Tree{
 		"admin": tcfg.Tree{
 			"enabled":       true,
@@ -483,7 +488,7 @@ func TestConfigureAdminFromTree(t *testing.T) {
 
 	// 测试 3：自定义前缀
 	core.ResetApps()
-	e3 := New(WithMode(ModeTest))
+	e3 := New()
 	err = e3.ConfigureAdminFromTree(tcfg.Tree{
 		"admin": tcfg.Tree{
 			"enabled":     true,

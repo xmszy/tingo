@@ -1,12 +1,9 @@
 package main
 
-// 本文件集中存放 tingo init --multi-app 的多应用脚手架模板，
-// 与 scaffold_templates.go 中的单应用/通用模板分离，便于独立维护。
-
-// ── 多应用模式：config/app.toml（[app] 段增加多应用调度键） ──
+// 多应用模式
 const tplAppConfigMulti = `# 应用配置。
 name = "{{.Name}}"
-debug = "${APP_DEBUG:-true}"
+debug = "${APP_DEBUG:-false}"
 default_app = "index"
 auto_multi_app = true
 # app_map  : url 段 -> 应用名（别名）。访问 /m/... 落到 admin 应用。
@@ -21,7 +18,6 @@ default_timezone = "Asia/Shanghai"
 # HTTP 服务。
 [server]
 addr = "${SERVER_ADDR:-:8080}"
-mode = "${SERVER_MODE:-debug}"     # debug / release / test
 print_routes = true
 read_timeout = "60s"
 read_header_timeout = "20s"
@@ -34,10 +30,6 @@ trusted_proxies = []
 `
 
 // ── 多应用模式：共享应用装配内核（core/kernel.go，被各子应用复用） ──
-//
-// 共享装配放在顶级的 core 包（与 app 平级），不放在 app 包，避免与
-// app/applications.go（聚合器，package app，匿名导入各子应用）形成 import cycle：
-// 子应用只 import 顶级 core/controller/middleware/provider，不 import app 包。
 const tplMultiAppKernel = `// Package core 是各子应用共享的装配内核。
 //
 // 多应用模式下，每个子应用（app/index、app/admin …）都通过本内核

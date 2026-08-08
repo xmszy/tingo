@@ -28,8 +28,6 @@ import (
 	"github.com/xmszy/tingo/os/tsession"
 	"github.com/xmszy/tingo/os/ttrace"
 	"github.com/xmszy/tingo/os/tview"
-
-	// 新增：crypto
 	"github.com/xmszy/tingo/os/tcrypto/aes"
 	"github.com/xmszy/tingo/os/tcrypto/crc32"
 	"github.com/xmszy/tingo/os/tcrypto/des"
@@ -57,7 +55,6 @@ import (
 	"github.com/xmszy/tingo/os/tconv"
 	"github.com/xmszy/tingo/os/tdebug"
 	"github.com/xmszy/tingo/os/tfile"
-	"github.com/xmszy/tingo/os/tmode"
 	"github.com/xmszy/tingo/os/tpage"
 	"github.com/xmszy/tingo/os/tpool"
 	"github.com/xmszy/tingo/os/tproc"
@@ -730,10 +727,7 @@ var TraceDefault = ttrace.Default
 // TraceSQL 向工具栏记录一条 SQL 查询。
 var TraceSQL = ttrace.LogSQL
 
-// EnableToolbar 返回调试工具栏中间件（tingo 原生 Handler）。
-//
-// 调试工具栏默认由配置驱动自动启用——只要 config/app.toml 的 debug=true
-// （或 .env 的 APP_DEBUG=true），框架会在 Kernel.Boot 时自动挂载。
+
 // 本函数保留作为手动覆盖入口（例如仅对某些应用显式开启），通常不必要。
 func EnableToolbar() Handler { return ttrace.Default().Handler() }
 
@@ -1232,17 +1226,23 @@ var UUIDShort = tuuid.Short
 // SID 生成 SID。
 var SID = tuuid.SID
 
-// ModeGet 获取运行模式。
-var ModeGet = tmode.Get
+// ModeGet 获取运行模式，由 APP_DEBUG 决定：true 为 "dev"，否则（含未设置）为 "prod"。
+var ModeGet = func() string {
+	if tenv.Get("APP_DEBUG", false) {
+		return "dev"
+	}
+	return "prod"
+}
 
-// ModeSet 设置运行模式。
-var ModeSet = tmode.Set
+// ModeIsDev 是否为开发模式。
+var ModeIsDev = func() bool {
+	return tenv.Get("APP_DEBUG", false)
+}
 
-// ModeIsDev 是否开发模式。
-var ModeIsDev = tmode.IsDev
-
-// ModeIsProd 是否生产模式。
-var ModeIsProd = tmode.IsProd
+// ModeIsProd 是否为生产模式。
+var ModeIsProd = func() bool {
+	return !tenv.Get("APP_DEBUG", false)
+}
 
 // PageNew 创建分页对象。
 var PageNew = tpage.NewPage

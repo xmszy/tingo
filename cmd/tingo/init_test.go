@@ -9,7 +9,7 @@ import (
 
 func TestSingleApplicationScaffoldTemplates(t *testing.T) {
 	for _, name := range []string{
-		"APP_DEBUG", "SERVER_ADDR", "SERVER_MODE", "DB_DRIVER", "DB_TYPE", "DB_HOST",
+		"APP_DEBUG", "SERVER_ADDR", "DB_DRIVER", "DB_TYPE", "DB_HOST",
 		"DB_NAME", "DB_USER", "DB_PASS", "DB_PORT", "DB_CHARSET", "DB_PREFIX", "LOG_LEVEL",
 	} {
 		t.Setenv(name, "")
@@ -75,8 +75,8 @@ func TestSingleApplicationScaffoldTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app config must parse without a .env file: %v\n%s", err, appConfig)
 	}
-	if !parsedAppConfig.Bool("debug") || !parsedAppConfig.Bool("server.print_routes") || parsedAppConfig.String("server.addr") != ":8080" {
-		t.Fatalf("app config does not preserve runnable defaults: %#v", parsedAppConfig.Data())
+	if parsedAppConfig.Bool("debug") || !parsedAppConfig.Bool("server.print_routes") || parsedAppConfig.String("server.addr") != ":8080" {
+		t.Fatalf("app config does not preserve runnable defaults (debug should default false): %#v", parsedAppConfig.Data())
 	}
 	databaseConfig, err := tcfg.NewFromBytes("toml", []byte(tplDatabaseConfig))
 	if err != nil {

@@ -3,11 +3,12 @@ package tingo
 import (
 	"context"
 
-	"github.com/xmszy/tingo/os/tcfg"
 	"github.com/xmszy/tingo/core"
 	"github.com/xmszy/tingo/database/tdb"
 	"github.com/xmszy/tingo/net/thttp"
 	"github.com/xmszy/tingo/net/thttp/middleware"
+	"github.com/xmszy/tingo/os/tcfg"
+	"github.com/xmszy/tingo/os/tenv"
 )
 
 // Version 是当前框架版本。
@@ -24,6 +25,10 @@ func NewBare(opts ...thttp.Option) *thttp.Engine {
 }
 
 func newEngine(app *core.App, bare bool, opts ...thttp.Option) *thttp.Engine {
+	// 在加载配置前自动加载 .env（及 .env.local），使 config/*.toml 中的
+	// ${APP_DEBUG} 等占位符可被展开；文件不存在时忽略，已存在的系统变量不会被覆盖。
+	_ = tenv.Load(".env", ".env.local")
+
 	if !app.HasService(tcfg.ServiceName) {
 		if err := app.Register(tcfg.NewService(".")); err != nil {
 			panic(err)
@@ -122,8 +127,6 @@ type (
 // 引擎配置项。
 var (
 	Addr        = thttp.Addr
-	Release     = thttp.Release
-	WithMode    = thttp.WithMode
 	PrintRoutes = thttp.PrintRoutes
 	TLS         = thttp.TLS
 )

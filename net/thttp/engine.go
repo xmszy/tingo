@@ -102,7 +102,7 @@ func NewWithApp(app *core.App, opts ...Option) *Engine {
 
 	gin.DebugPrintFunc = func(string, ...any) {}
 	gin.DebugPrintRouteFunc = func(string, string, string, int) {}
-	gin.SetMode(cfg.ginMode())
+	gin.SetMode(ginModeFromEnv())
 
 	g := gin.New()
 	g.RedirectTrailingSlash = cfg.RedirectTrailingSlash
@@ -142,7 +142,7 @@ func (e *Engine) Config() Config { return e.cfg }
 func (e *Engine) applyConfig(cfg Config) error {
 	e.cfg = cfg
 	e.bindMeta = cfg.BindRouteMeta
-	gin.SetMode(cfg.ginMode())
+	gin.SetMode(ginModeFromEnv())
 	e.gin.RedirectTrailingSlash = cfg.RedirectTrailingSlash
 	e.gin.RedirectFixedPath = cfg.RedirectFixedPath
 	e.gin.HandleMethodNotAllowed = cfg.HandleMethodNotAllowed
@@ -484,10 +484,10 @@ func (e *Engine) ShutdownContext(ctx context.Context) error {
 
 // printStartup 打印服务已就绪信息。
 func (e *Engine) printStartup(boundAddr net.Addr, elapsed time.Duration) {
-	if e.cfg.Mode == ModeRelease && !e.cfg.PrintRoutes {
+	if !isDebug() && !e.cfg.PrintRoutes {
 		return
 	}
-	fmt.Fprintf(os.Stdout, "\n[TINGO] mode=%s\n", e.cfg.Mode)
+	fmt.Fprintf(os.Stdout, "\n[TINGO] mode=%s\n", ginModeFromEnv())
 	if e.cfg.PrintRoutes {
 		for _, route := range e.Routes() {
 			fmt.Fprintf(os.Stdout, "[TINGO] %-7s %-32s --> %s\n", route.Method, route.Path, route.Handler)

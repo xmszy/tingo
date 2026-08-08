@@ -117,8 +117,9 @@ func TestToolbarTraceChannel(t *testing.T) {
 	}
 }
 
-// TestToolbarNonHTMLHeader 验证非 HTML 响应写入 X-Tingo-Trace 头。
-func TestToolbarNonHTMLHeader(t *testing.T) {
+// TestToolbarNonHTMLInjection 验证非 HTML 响应（如 JSON）也注入右下角浮层，
+// 与 ThinkPHP 行为一致：数据保留且 Content-Type 改写为 text/html 使浮层可渲染。
+func TestToolbarNonHTMLInjection(t *testing.T) {
 	tb := ttrace.Default()
 	ttrace.LogSQL("SELECT 1", 0)
 
@@ -134,7 +135,15 @@ func TestToolbarNonHTMLHeader(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Result().Header.Get("X-Tingo-Trace") == "" {
-		t.Error("非 HTML 响应缺少 X-Tingo-Trace 头")
+	body := rec.Body.String()
+	if !strings.Contains(body, "tingo_page_trace") {
+		t.Error("JSON 响应未注入浮层（与 TP 行为不符）")
+	}
+	if !strings.Contains(body, `{"ok":true}`) {
+		t.Error("原 JSON 数据丢失")
+	}
+	ct := rec.Result().Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("JSON 响应 Content-Type 未改写为 text/html: %q", ct)
 	}
 }

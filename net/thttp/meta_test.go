@@ -27,7 +27,7 @@ func (goodsCtrl) Index(c *core.Ctx) {
 func TestRouteMetaResolved(t *testing.T) {
 	core.ResetApps()
 	core.RegisterApp("shop", metaApp{})
-	e := New(WithMode(ModeTest))
+	e := New()
 
 	w := do(e, http.MethodGet, "/shop/goods", "")
 	if got, want := w.Body.String(), "shop|goods_ctrl|Index"; got != want {
@@ -39,7 +39,7 @@ func TestRouteMetaResolved(t *testing.T) {
 func TestRouteMetaDisabled(t *testing.T) {
 	core.ResetApps()
 	core.RegisterApp("shop", metaApp{})
-	e := New(WithMode(ModeTest), DisableRouteMeta())
+	e := New(DisableRouteMeta())
 
 	w := do(e, http.MethodGet, "/shop/goods", "")
 	if got, want := w.Body.String(), "||"; got != want {
@@ -54,7 +54,7 @@ func TestRouteMetaDisabled(t *testing.T) {
 func TestRouteMetaZeroAlloc(t *testing.T) {
 	core.ResetApps()
 	core.RegisterApp("shop", metaApp{})
-	e := New(WithMode(ModeTest))
+	e := New()
 	if err := e.Boot(); err != nil {
 		t.Fatal(err)
 	}

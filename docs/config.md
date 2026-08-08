@@ -13,7 +13,7 @@ CONFIG_EXT=ini
 
 配置文件按文件名自动映射为一组配置项：
 
-- `config/app.toml` → 可通过 `t.Config().String("app.debug")` 读取
+- `config/app.toml` → 可通过 `t.Config().Bool("debug")` 读取
 - `config/database.toml` → 可通过 `t.Config().String("database.default")` 读取
 - `app/admin/config/database.toml` → admin 应用专属数据库配置
 
@@ -27,12 +27,13 @@ CONFIG_EXT=ini
 
 ~~~toml
 # app.toml
-debug = true
+debug = false        # 总调试开关（.env 中 APP_DEBUG=true 时自动为 true）：开启后挂载 ttrace 调试工具栏、打印 SQL 等
 default_timezone = "Asia/Shanghai"
 default_app = "app"
 default_lang = "zh-cn"
 
 [server]
+# addr 可写为 ":8080" 或纯端口号 "8080"（框架自动补 ":"）
 addr = ":8080"
 read_timeout = "30s"
 write_timeout = "30s"
@@ -42,8 +43,8 @@ max_header_bytes = 1048576
 在代码中读取：
 
 ~~~go
-debug := t.Config().Bool("app.debug", false)
-addr := t.Config().String("app.server.addr", ":8080")
+debug := t.Config().Bool("debug", false)
+addr := t.Config().String("server.addr", ":8080")
 
 // 在 handler 中读取当前请求所属应用的配置
 cfg := t.ConfigFrom(c)
@@ -137,24 +138,27 @@ ext = ".html"
 
 ## 环境变量
 
-Tingo 默认加载根目录的 `.env` 文件，支持 Tingo 风格的变量命名：
+Tingo 在加载配置前会**自动**读取项目根目录下的 `.env`（及 `.env.local`，文件不存在时忽略）。因此 `config/*.toml` 中的 `${APP_DEBUG}` 等占位符可以直接展开，无需手动 `t.EnvLoad`。如需额外加载其他文件或覆盖已有变量，仍可显式调用 `t.EnvLoad(...)`。也可直接通过 `os.Setenv` / shell `export` 预先设置。
+
+配置文件里的 `${VAR}` 占位符在解析时展开，支持 `${VAR:-default}` 形式（变量缺失时取默认值）。
 
 ~~~dotenv
-APP_DEBUG=true
+APP_DEBUG=false       # 统一的总调试开关：true 时 debug=true 并挂载 ttrace 调试工具栏，默认 false
 DB_TYPE=mysql
 DB_HOST=127.0.0.1
 DB_NAME=test
 DB_USER=root
 DB_PASS=password
 DB_PORT=3306
+SERVER_ADDR=8080      # 端口可只写数字，框架自动补 ":"；或写 ":8080"
 CONFIG_EXT=toml
 ~~~
 
 在代码中使用 `tenv` 门面方法读取：
 
 ~~~go
-debug := t.Env("app.debug", false)
-value, ok := t.EnvLookup("db.host")
-_ = t.EnvHas("custom.flag")
+debug := t.Env("APP_DEBUG", "false")   // 读环境变量名（大写），不是配置键
+value, ok := t.EnvLookup("DB_HOST")
+_ = t.EnvHas("CUSTOM_FLAG")
 _ = t.EnvExpand("${DB_HOST}:3306")
 ~~~

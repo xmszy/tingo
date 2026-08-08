@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/xmszy/tingo/core"
-	"github.com/xmszy/tingo/net/thttp"
 )
 
 type isolatedApplication struct {
@@ -22,8 +21,9 @@ func (a isolatedApplication) Routes(router core.Router) {
 }
 
 func TestNewAppOwnsRuntimeState(t *testing.T) {
+	t.Setenv("APP_DEBUG", "true")
 	var requestApp *core.App
-	framework := NewApp(thttp.WithMode(thttp.ModeTest)).
+	framework := NewApp().
 		App("index", isolatedApplication{framework: &requestApp})
 
 	response := httptest.NewRecorder()

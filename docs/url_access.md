@@ -16,7 +16,12 @@ http://host:port/[应用前缀/][控制器/][操作][/参数]
 | `/user` | 默认应用 | User | Index |
 | `/user/info` | 默认应用 | User | Info |
 | `/admin/` | admin | Index | Index |
+| `/admin/index` | admin | Index | Index |
 | `/admin/user/list` | admin | User | List |
+
+> Index 操作（索引动作）默认映射到**控制器根路径**（如 `/admin`），
+> 同时框架也会额外注册 `/admin/index` 这条「控制器/方法」写法，两者等价，
+> 因此 `/admin`、`/admin/`、`/admin/index` 均可访问首页。
 
 ## 大小写
 

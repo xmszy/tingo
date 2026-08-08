@@ -23,9 +23,15 @@ func fmtMB(b uint64) string {
 
 func fmtThroughput(elapsed time.Duration) string {
 	if elapsed <= 0 {
-		return "0.00"
+		return "—"
 	}
 	rps := float64(time.Second) / float64(elapsed)
+	if rps >= 1e6 {
+		return fmt.Sprintf("%.2fM", rps/1e6)
+	}
+	if rps >= 1e3 {
+		return fmt.Sprintf("%.2fK", rps/1e3)
+	}
 	return strconv.FormatFloat(rps, 'f', 2, 64)
 }
 
@@ -102,14 +108,28 @@ func (w *tingoCapture) Size() int      { return w.buf.Len() }
 func (w *tingoCapture) Written() bool  { return w.written }
 func (w *tingoCapture) WriteHeaderNow() {}
 
+// shouldInjectBody 判断是否把面板 HTML 拼进响应体。
+// 对齐 ThinkPHP 行为：所有响应类型（HTML / 纯文本 / JSON / XML 等）都会注入浮层，
+// 仅当状态码为 204（No Content）时不注入。JSON/XML 被注入后会变为「数据 + 浮层 HTML」混合，
+// 与 TP 一致（debug 模式下以浏览器可直接查看调试信息为优先）。
+func shouldInjectBody(ct string) bool {
+	_ = ct
+	return true
+}
+
 // close 把缓冲内容写出（注入面板），并写入兜底头。
 func (w *tingoCapture) close() {
 	body := w.buf.Bytes()
 	ct := w.ResponseWriter.Header().Get("Content-Type")
-	isHTML := strings.Contains(strings.ToLower(ct), "text/html")
+	inject := shouldInjectBody(ct)
 
-	if isHTML && w.status != http.StatusNoContent {
+	if inject && w.status != http.StatusNoContent {
 		body = injectToolbar(body, w.toolbar, w.req, w.start, w.status)
+		// 非 HTML 文本响应（纯文本/字符串/无 Content-Type）改写为 text/html，
+		// 使右下角浮层被浏览器正常渲染，而不是把面板 HTML 当作源码显示在页面里。
+		if !strings.Contains(strings.ToLower(ct), "text/html") {
+			w.ResponseWriter.Header().Set("Content-Type", "text/html; charset=utf-8")
+		}
 	} else {
 		w.ResponseWriter.Header().Set("X-Tingo-Trace", w.toolbar.summary(w.req, w.status, time.Since(w.start)))
 	}
@@ -159,10 +179,15 @@ func (w *responseCapture) Flush() {
 func (w *responseCapture) Close() {
 	body := w.buf.Bytes()
 	ct := w.ResponseWriter.Header().Get("Content-Type")
-	isHTML := strings.Contains(strings.ToLower(ct), "text/html")
+	inject := shouldInjectBody(ct)
 
-	if isHTML && w.status != http.StatusNoContent {
+	if inject && w.status != http.StatusNoContent {
 		body = injectToolbar(body, w.toolbar, w.req, w.start, w.status)
+		// 非 HTML 文本响应（纯文本/字符串/无 Content-Type）改写为 text/html，
+		// 使右下角浮层被浏览器正常渲染，而不是把面板 HTML 当作源码显示在页面里。
+		if !strings.Contains(strings.ToLower(ct), "text/html") {
+			w.ResponseWriter.Header().Set("Content-Type", "text/html; charset=utf-8")
+		}
 	} else {
 		w.ResponseWriter.Header().Set("X-Tingo-Trace", w.toolbar.summary(w.req, w.status, time.Since(w.start)))
 	}

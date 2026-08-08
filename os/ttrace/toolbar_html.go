@@ -70,14 +70,22 @@ func (tb *Toolbar) Middleware() func(http.Handler) http.Handler {
 	}
 }
 
-// injectToolbar 在 HTML 的 </body> 前注入调试面板。
+// injectToolbar 在 HTML 响应返回时注入调试面板（参考 ThinkPHP 页面 Trace）。
+// 优先插入到 </body> 之前；若响应体不含 </body>（HTML 片段、SPA 首屏、
+// 模板未闭合 body 等），则直接追加到响应末尾，保证面板“任何 HTML 响应都能显示”。
 func injectToolbar(body []byte, tb *Toolbar, r *http.Request, start time.Time, statusCode int) []byte {
-	idx := lastBodyIndex(body)
-	if idx < 0 {
-		return body
-	}
 	elapsed := time.Since(start)
 	htmlPart := tb.buildHTML(r, statusCode, elapsed)
+
+	idx := lastBodyIndex(body)
+	if idx < 0 {
+		// 没有 </body> 标签：追加到响应末尾（不破坏其他内容）。
+		result := make([]byte, 0, len(body)+len(htmlPart))
+		result = append(result, body...)
+		result = append(result, htmlPart...)
+		return result
+	}
+
 	result := make([]byte, 0, len(body)+len(htmlPart))
 	result = append(result, body[:idx]...)
 	result = append(result, htmlPart...)
@@ -113,7 +121,7 @@ func (tb *Toolbar) buildHTML(r *http.Request, statusCode int, elapsed time.Durat
 		tabs = append(tabs, traceTab{Title: "调试", Items: debugItems()})
 	}
 
-	return []byte(renderTraceHTML(formatElapsedSec(elapsed), tabs))
+	return []byte(tb.render(formatElapsedSec(elapsed), tabs))
 }
 
 // baseItems 为「基本」分区：运行时间 / 吞吐率 / 内存 / 文件 / 缓存 / 会话。

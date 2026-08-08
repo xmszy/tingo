@@ -18,6 +18,7 @@ package ttrace
 
 import (
 	"fmt"
+	"text/template"
 	"runtime"
 	"sync"
 	"time"
@@ -29,10 +30,12 @@ import (
 //
 //	Type    : "Html"（页面注入）或 "Console"（命令行输出）
 //	Channel : 日志通道名（仅在 Console 模式相关）
+//	          留空则用内置默认模板；文件不存在时回退到内置模板。
 //	Panels  : 各分区显隐开关（默认全 true）
 type Config struct {
 	Type    string `toml:"type" json:"type"`
 	Channel string `toml:"channel" json:"channel"`
+	File    string `toml:"file" json:"file"`
 	Panels  Panels `toml:"panels" json:"panels"`
 }
 
@@ -58,6 +61,10 @@ type Toolbar struct {
 	Config    Config
 	startTime time.Time
 	skipPaths []string // 不注入的路径前缀
+
+	tplOnce sync.Once
+	tpl     *template.Template
+	tplErr  error
 }
 
 // Default 返回默认工具栏（Html 类型、所有分区启用）。
@@ -78,10 +85,13 @@ func Default() *Toolbar {
 
 // NewWithConfig 用指定配置构造工具栏。
 func NewWithConfig(cfg Config) *Toolbar {
-	return &Toolbar{
+	tb := &Toolbar{
 		Config:    cfg,
 		startTime: time.Now(),
 	}
+	// 预加载模板（自定义文件缺失会回退内置，不阻塞创建）。
+	_, _ = tb.loadTemplate()
+	return tb
 }
 
 // SkipPaths 设置不注入工具栏的路径前缀（如 /api /static /debug）。
