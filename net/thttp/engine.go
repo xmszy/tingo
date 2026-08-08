@@ -123,12 +123,12 @@ func NewWithApp(app *core.App, opts ...Option) *Engine {
 		routes:      make([]RouteInfo, 0, 64),
 	}
 
-	g.Use(func(ctx *gin.Context) {
-		if e.appKeyBound {
+	if e.appKeyBound {
+		g.Use(func(ctx *gin.Context) {
 			core.BindFrameworkApp(core.FromGin(ctx), app)
-		}
-		ctx.Next()
-	})
+			ctx.Next()
+		})
+	}
 	e.installNotFound()
 	return e
 }

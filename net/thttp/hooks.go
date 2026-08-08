@@ -82,7 +82,13 @@ func (e *Engine) executeHooks(ht HookType, ctx *core.Ctx) {
 // 中间件在路由匹配之前执行，将 before 钩子作为中间件一部分运行。
 
 // installHookMiddleware 安装钩子中间件。在 Boot() 时调用一次。
+//
+// 未注册任何钩子时直接跳过，避免给每个请求叠加一次「加锁 + map 查找」
+// 的中间件开销。
 func (e *Engine) installHookMiddleware() {
+	if len(e.hooks) == 0 {
+		return
+	}
 	e.gin.Use(func(ginCtx *gin.Context) {
 		ctx := core.FromGin(ginCtx)
 
