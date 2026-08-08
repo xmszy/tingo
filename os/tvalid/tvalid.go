@@ -130,6 +130,31 @@ type Validator struct {
 	mu    sync.RWMutex
 	rules map[string]RuleFunc
 	msgs  map[string]string // 规则 → 默认错误提示模板
+
+	// freeze 后保存只读快照，热路径读取不再加锁。
+	frozen      bool
+	frozenRules map[string]RuleFunc
+	frozenMsgs  map[string]string
+}
+
+// freeze 在首次校验前把规则表冻结为只读快照；之后 Register 会重新冻结。
+func (v *Validator) freeze() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.frozen {
+		return
+	}
+	nr := make(map[string]RuleFunc, len(v.rules))
+	for k, f := range v.rules {
+		nr[k] = f
+	}
+	nm := make(map[string]string, len(v.msgs))
+	for k, m := range v.msgs {
+		nm[k] = m
+	}
+	v.frozenRules = nr
+	v.frozenMsgs = nm
+	v.frozen = true
 }
 
 // RuleFunc 规则函数：值→错误信息（空=nil 表示通过）。
@@ -153,6 +178,7 @@ func (v *Validator) Register(name string, fn RuleFunc, defaultMsg string) {
 	if defaultMsg != "" {
 		v.msgs[name] = defaultMsg
 	}
+	v.frozen = false // 规则变更，下次校验重新冻结
 }
 
 // RegisterMsg 为内置规则注册自定义错误提示。
@@ -160,12 +186,16 @@ func (v *Validator) RegisterMsg(name, msg string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.msgs[name] = msg
+	v.frozen = false
 }
 
 // ──────────────── 校验入口 ────────────────
 
 // Check 校验 data map（key 对应对应 ruleSpec 中的 key）。
 func (v *Validator) Check(data map[string]any, ruleSpec RuleSpec) error {
+	if !v.frozen {
+		v.freeze()
+	}
 	rules := parseRules(ruleSpec)
 	var errs Errors
 	for field, value := range data {
@@ -185,11 +215,105 @@ func (v *Validator) Check(data map[string]any, ruleSpec RuleSpec) error {
 	return nil
 }
 
+// ──────────────── 结构体解析缓存 ────────────────
+//
+// 同一结构体类型的 tag 解析结果（字段规则、label、confirm 信息、form→字段索引）
+// 在每次请求中是完全相同的。这里按 reflect.Type 缓存，避免每请求重复反射与建 map。
+// 缓存只保存「类型信息」，不含任何 reflect.Value，因此天然并发安全。
+
+type fieldMeta struct {
+	index int      // 字段在结构体中的索引
+	name  string   // 原始字段名
+	label string   // label tag（为空则等于 name）
+	rules []Rule    // 该字段的校验规则（已解析）
+}
+
+type structMeta struct {
+	fields   []fieldMeta
+	confirms []confirmInfo
+	formIdx  map[string]int // form tag / snake_case → 字段索引，用于 confirm 查找
+}
+
+var structCache sync.Map // reflect.Type → *structMeta
+
+func getStructMeta(rt reflect.Type) *structMeta {
+	if m, ok := structCache.Load(rt); ok {
+		return m.(*structMeta)
+	}
+	m := buildStructMeta(rt)
+	structCache.Store(rt, m)
+	return m
+}
+
+// buildStructMeta 一次性解析结构体类型（递归处理嵌套结构体）。
+func buildStructMeta(rt reflect.Type) *structMeta {
+	m := &structMeta{
+		formIdx: make(map[string]int),
+	}
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		formTag := f.Tag.Get("form")
+		if formTag != "" {
+			m.formIdx[formTag] = i
+		}
+		m.formIdx[snakeCase(f.Name)] = i
+
+		tag := f.Tag.Get("valid")
+		if tag == "-" {
+			continue
+		}
+		fm := fieldMeta{index: i, name: f.Name, label: f.Name}
+		if label := f.Tag.Get("label"); label != "" {
+			fm.label = label
+		}
+		if tag != "" {
+			fm.rules = parseTagRules(tag)
+		}
+		if f.Type.Kind() == reflect.Struct && !isBasicType(f.Type) {
+			nested := buildStructMeta(f.Type)
+			for _, nf := range nested.fields {
+				cf := nf
+				cf.name = f.Name + "." + nf.name
+				cf.label = f.Name + "." + nf.label
+				m.fields = append(m.fields, cf)
+			}
+			m.confirms = append(m.confirms, nested.confirms...)
+		} else {
+			m.fields = append(m.fields, fm)
+		}
+
+		// 提取 confirm 规则（目标字段为本字段）
+		for _, r := range fm.rules {
+			if r.Name != "confirm" {
+				continue
+			}
+			confirmField := formTag
+			if confirmField == "" {
+				confirmField = snakeCase(f.Name)
+			}
+			confirmField = confirmField + "_confirmation"
+			if len(r.Args) > 0 && r.Args[0] != "" {
+				confirmField = r.Args[0]
+			}
+			m.confirms = append(m.confirms, confirmInfo{
+				confirmField: confirmField,
+				targetField:  f.Name,
+				ruleName:     r.Name,
+			})
+		}
+	}
+	return m
+}
+
 // CheckStruct 校验结构体（基于 valid tag）。
 // 自动处理 confirm 规则（值相等性校验）。
 func (v *Validator) CheckStruct(obj any) error {
-	_, labels := parseStructRules(obj)
-	var errs Errors
+	if !v.frozen {
+		v.freeze()
+	}
 	rv := reflect.ValueOf(obj)
 	if rv.Kind() == reflect.Ptr {
 		rv = rv.Elem()
@@ -198,38 +322,27 @@ func (v *Validator) CheckStruct(obj any) error {
 		return fmt.Errorf("tvalid: CheckStruct requires struct, got %T", obj)
 	}
 	rt := rv.Type()
+	meta := getStructMeta(rt)
 
-	// 收集 confirm 规则（提前一次遍历）
-	confirms := collectConfirms(rt)
-	// 构建 form tag → reflect.Value 映射（用于 confirm 查找）
-	formMap := buildFormTagMap(rt, rv)
-
-	for i := 0; i < rt.NumField(); i++ {
-		field := rt.Field(i)
-		tag := field.Tag.Get("valid")
-		if tag == "" || tag == "-" {
+	var errs Errors
+	for _, fm := range meta.fields {
+		if len(fm.rules) == 0 {
 			continue
 		}
-		fieldRules := parseTagRules(tag)
-		value := rv.Field(i).Interface()
-		fieldName := field.Name
-		if label, ok := labels[fieldName]; ok {
-			fieldName = label
-		}
-		for _, rule := range fieldRules {
-			// confirm 规则需要在所有收集完成后统一验证
+		value := rv.Field(fm.index).Interface()
+		for _, rule := range fm.rules {
 			if rule.Name == "confirm" {
-				continue
+				continue // confirm 统一处理
 			}
-			if err := v.checkRule(fieldName, rule, value); err != nil {
+			if err := v.checkRule(fm.label, rule, value); err != nil {
 				errs = append(errs, err)
 			}
 		}
 	}
 
 	// 统一验证 confirm 规则
-	for _, ci := range confirms {
-		confirmVal, ok := formMap[ci.confirmField]
+	for _, ci := range meta.confirms {
+		idx, ok := meta.formIdx[ci.confirmField]
 		if !ok {
 			errs = append(errs, &Error{
 				Field:   ci.targetField,
@@ -239,6 +352,7 @@ func (v *Validator) CheckStruct(obj any) error {
 			continue
 		}
 		targetVal := rv.FieldByName(ci.targetField)
+		confirmVal := rv.Field(idx)
 		if !equalValue(targetVal.Interface(), confirmVal.Interface()) {
 			errs = append(errs, &Error{
 				Field:   ci.targetField,
@@ -254,47 +368,25 @@ func (v *Validator) CheckStruct(obj any) error {
 	return nil
 }
 
-// buildFormTagMap 构建字段 form tag（去掉后缀如 _confirmation）→ reflect.Value 映射。
-func buildFormTagMap(rt reflect.Type, rv reflect.Value) map[string]reflect.Value {
-	m := make(map[string]reflect.Value)
-	for i := 0; i < rt.NumField(); i++ {
-		f := rt.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		formTag := f.Tag.Get("form")
-		if formTag != "" {
-			m[formTag] = rv.Field(i)
-		}
-		// 同时用 snake_case 映射
-		m[snakeCase(f.Name)] = rv.Field(i)
-	}
-	return m
-}
-
 // equalValue 比较两个值是否相等（支持基础类型）。
 func equalValue(a, b any) bool {
 	return toString(a) == toString(b)
 }
 
 func (v *Validator) checkRule(field string, rule Rule, value any) *Error {
-	v.mu.RLock()
-	fn, ok := v.rules[rule.Name]
-	v.mu.RUnlock()
+	fn, ok := v.frozenRules[rule.Name]
 	if !ok {
 		return &Error{Field: field, Rule: rule.Name, Message: "unknown rule: " + rule.Name}
 	}
 	if err := fn(value, rule.Args); err != nil {
 		msg := err.Error()
-		v.mu.RLock()
-		if tpl, ex := v.msgs[rule.Name]; ex {
+		if tpl, ex := v.frozenMsgs[rule.Name]; ex {
 			msg = tpl
 			// 简单模板替换
 			msg = strings.ReplaceAll(msg, "{field}", field)
 			msg = strings.ReplaceAll(msg, "{rule}", rule.Name)
 			msg = strings.ReplaceAll(msg, "{args}", strings.Join(rule.Args, ","))
 		}
-		v.mu.RUnlock()
 		return &Error{Field: field, Rule: rule.Name, Message: msg}
 	}
 	return nil
@@ -653,46 +745,6 @@ func splitArgs(s string) []string {
 	return strings.Split(s, ",")
 }
 
-// parseStructRules 从结构体解析 valid tag 规则和 label。
-func parseStructRules(obj any) (Rules, map[string]string) {
-	rules := make(Rules)
-	labels := make(map[string]string)
-	rt := reflect.TypeOf(obj)
-	if rt.Kind() == reflect.Ptr {
-		rt = rt.Elem()
-	}
-	if rt.Kind() != reflect.Struct {
-		return rules, labels
-	}
-	for i := 0; i < rt.NumField(); i++ {
-		f := rt.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		tag := f.Tag.Get("valid")
-		if tag == "-" {
-			continue
-		}
-		if tag != "" {
-			rules[f.Name] = parseTagRules(tag)
-		}
-		if label := f.Tag.Get("label"); label != "" {
-			labels[f.Name] = label
-		}
-		// 递归处理嵌套结构体
-		if f.Type.Kind() == reflect.Struct && !isBasicType(f.Type) {
-			nestedRules, nestedLabels := parseStructRules(reflect.New(f.Type).Interface())
-			for k, v := range nestedRules {
-				rules[f.Name+"."+k] = v
-			}
-			for k, v := range nestedLabels {
-				labels[f.Name+"."+k] = v
-			}
-		}
-	}
-	return rules, labels
-}
-
 func isBasicType(t reflect.Type) bool {
 	k := t.Kind()
 	return k >= reflect.Bool && k <= reflect.Complex128 || k == reflect.String
@@ -849,42 +901,6 @@ type confirmInfo struct {
 	confirmField string // 确认字段名（如 "password_confirm"）
 	targetField  string // 被确认的目标字段名（如 "Password"）
 	ruleName     string // 原始规则名（confirm）
-}
-
-// collectConfirms 从结构体提取 confirm 规则。
-func collectConfirms(rt reflect.Type) []confirmInfo {
-	var infos []confirmInfo
-	for i := 0; i < rt.NumField(); i++ {
-		f := rt.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		tag := f.Tag.Get("valid")
-		if tag == "" || tag == "-" {
-			continue
-		}
-		for _, r := range parseTagRules(tag) {
-			if r.Name != "confirm" {
-				continue
-			}
-			confirmField := f.Tag.Get("form")
-			if confirmField == "" {
-				confirmField = snakeCase(f.Name)
-			}
-			confirmField = confirmField + "_confirmation"
-
-			// 如果 confirm 规则有参数，使用参数指定的字段名
-			if len(r.Args) > 0 && r.Args[0] != "" {
-				confirmField = r.Args[0]
-			}
-			infos = append(infos, confirmInfo{
-				confirmField: confirmField,
-				targetField:  f.Name,
-				ruleName:     r.Name,
-			})
-		}
-	}
-	return infos
 }
 
 // snakeCase 将驼峰转为 snake_case。

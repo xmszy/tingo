@@ -5,6 +5,7 @@
 package tutil
 
 import (
+	"slices"
 	"encoding/gob"
 	"bytes"
 )
@@ -41,12 +42,7 @@ func Reduce[T, U any](s []T, init U, fn func(acc U, item T) U) U {
 
 // Contains 判断元素是否在切片中（要求 comparable）。
 func Contains[T comparable](s []T, v T) bool {
-	for _, item := range s {
-		if item == v {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s, v)
 }
 
 // IndexOf 查找元素在切片中的位置，未找到返回 -1。

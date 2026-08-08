@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 /* ------------------------------------------------------------------ */
@@ -92,6 +93,9 @@ type App struct {
 
 	applications map[string]*appEntry
 	routeMeta    map[string]*RouteMeta
+	// routeMetaSnap 是 routeMeta 的只读快照（注册期写入、运行时只读），
+	// 用 atomic.Pointer 发布，使 routeMetaOf 免每请求加锁。
+	routeMetaSnap atomic.Pointer[map[string]*RouteMeta]
 }
 
 // NewApp 创建一个新的 App 实例。

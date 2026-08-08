@@ -16,8 +16,10 @@ type fieldMeta struct {
 
 // structMeta 预计算的完整结构体元信息（线程安全缓存）。
 type structMeta struct {
-	fields   []fieldMeta    // 可扫描字段列表
-	colIndex map[string]int // 列名 → 字段索引，O(1) 查找
+	fields       []fieldMeta    // 可扫描字段列表
+	colIndex     map[string]int // 列名 → 字段索引，O(1) 查找
+	fieldIndex   map[string]int // 字段名 → 字段索引，供 findField 查表
+	softDeleteCol string        // 软删除列名（空=无）
 }
 
 var (
@@ -78,6 +80,7 @@ func metaFor(t reflect.Type) *structMeta {
 
 	fields := make([]fieldMeta, 0, t.NumField())
 	colIdx := make(map[string]int, t.NumField())
+	fieldIdx := make(map[string]int, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if f.PkgPath != "" { // 非导出字段跳过
@@ -89,9 +92,11 @@ func metaFor(t reflect.Type) *structMeta {
 		}
 		fields = append(fields, fieldMeta{index: i, column: col})
 		colIdx[col] = i
+		fieldIdx[f.Name] = i
 	}
 
-	m = &structMeta{fields: fields, colIndex: colIdx}
+	sdCol, _ := softDeleteField(t)
+	m = &structMeta{fields: fields, colIndex: colIdx, fieldIndex: fieldIdx, softDeleteCol: sdCol}
 	metaCache[t] = m
 	return m
 }

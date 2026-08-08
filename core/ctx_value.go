@@ -109,13 +109,18 @@ func metaKey(method, fullPath string) string { return method + " " + fullPath }
 func (a *App) RegisterRouteMeta(method, fullPath string, meta *RouteMeta) {
 	a.mu.Lock()
 	a.routeMeta[metaKey(method, fullPath)] = meta
+	// 发布只读快照：指向 App 的 routeMeta 字段（字段地址在 App 生命周期内稳定，
+	// map 赋值是原子的），使运行时 routeMetaOf 免加锁。
+	a.routeMetaSnap.Store(&a.routeMeta)
 	a.mu.Unlock()
 }
 
 func (a *App) routeMetaOf(method, fullPath string) (*RouteMeta, bool) {
-	a.mu.RLock()
-	meta, ok := a.routeMeta[metaKey(method, fullPath)]
-	a.mu.RUnlock()
+	snap := a.routeMetaSnap.Load()
+	if snap == nil {
+		return nil, false
+	}
+	meta, ok := (*snap)[metaKey(method, fullPath)]
 	return meta, ok
 }
 
@@ -161,5 +166,6 @@ func ResetMeta() {
 	app := DefaultApp()
 	app.mu.Lock()
 	app.routeMeta = make(map[string]*RouteMeta, 64)
+	app.routeMetaSnap.Store(&app.routeMeta)
 	app.mu.Unlock()
 }

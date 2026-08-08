@@ -939,8 +939,17 @@ func collectIDs(slice reflect.Value, fieldName string) []any {
 }
 
 // findField 递归查找字段（支持嵌入结构体），按 tdb/db/json 标签或字段名匹配。
+// 优先用 structMeta 的字段/列索引查表（缓存，免逐字段反射），查不到再退化递归。
 func findField(v reflect.Value, name string) reflect.Value {
 	t := v.Type()
+	if m := metaFor(t); m != nil {
+		if idx, ok := m.colIndex[name]; ok {
+			return v.Field(idx)
+		}
+		if idx, ok := m.fieldIndex[name]; ok {
+			return v.Field(idx)
+		}
+	}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if f.PkgPath != "" {

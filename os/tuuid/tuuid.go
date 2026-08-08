@@ -32,7 +32,13 @@ func V4() string {
 func V1Simple() string {
 	ts := uint64(time.Now().UnixNano()/100 + 0x01B21DD213814000) // 100ns ticks since UUID epoch
 	var node [6]byte
-	rand.Read(node[:])
+	if _, err := rand.Read(node[:]); err != nil {
+		// fallback: 使用时间戳派生的伪随机节点，保证不返回全零弱 UUID
+		v := uint64(time.Now().UnixNano()) ^ counter.Add(1)
+		for i := range node {
+			node[i] = byte(v >> (8 * (i % 8)))
+		}
+	}
 
 	var b [16]byte
 	binary.BigEndian.PutUint32(b[0:4], uint32(ts>>32))      // time_low

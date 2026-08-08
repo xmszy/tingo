@@ -86,17 +86,15 @@ func softDeleteField(t reflect.Type) (string, bool) {
 
 // hasSoftDelete 检查指针/结构体是否包含软删除字段。
 func hasSoftDelete(v any) (string, bool) {
-	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			return "", false
-		}
-		rv = rv.Elem()
+	rt := reflect.TypeOf(v)
+	for rt != nil && rt.Kind() == reflect.Pointer {
+		rt = rt.Elem()
 	}
-	if rv.Kind() != reflect.Struct {
+	if rt == nil || rt.Kind() != reflect.Struct {
 		return "", false
 	}
-	return softDeleteField(rv.Type())
+	col := metaFor(rt).softDeleteCol
+	return col, col != ""
 }
 
 // softDeleteWhere 生成软删除过滤条件。

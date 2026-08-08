@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 
 	terrors "github.com/xmszy/tingo/errors"
 )
@@ -14,9 +15,12 @@ import (
 // 使用 Go 类型本身作为键，解析结果无需类型断言，且错误在编译期即可发现。
 //
 // 服务默认为单例且懒加载，首次 Resolve 时构造，之后复用。
+//
+// providers 通过 atomic.Pointer 发布只读快照：绑定只在启动期发生，
+// 运行期 Resolve 读取快照免加锁。
 type Container struct {
 	mu          sync.RWMutex
-	providers   map[reflect.Type]*binding
+	providers   atomic.Pointer[map[reflect.Type]*binding]
 	parent      *Container
 	constructed []any
 	closed      bool
@@ -38,12 +42,25 @@ type binding struct {
 
 // NewContainer 创建一个空容器。
 func NewContainer() *Container {
-	return &Container{providers: make(map[reflect.Type]*binding, 16)}
+	c := &Container{}
+	p := make(map[reflect.Type]*binding, 16)
+	c.providers.Store(&p)
+	return c
 }
 
 // NewScope 创建继承当前容器绑定的子作用域。子作用域可覆盖父级服务。
 func (c *Container) NewScope() *Container {
-	return &Container{providers: make(map[reflect.Type]*binding, 8), parent: c}
+	child := &Container{parent: c}
+	// 继承父级绑定到独立 map，避免修改子作用域影响父级。
+	parent := c.providers.Load()
+	p := make(map[reflect.Type]*binding, 8)
+	if parent != nil {
+		for k, v := range *parent {
+			p[k] = v
+		}
+	}
+	child.providers.Store(&p)
+	return child
 }
 
 // Default 返回默认 App 所属的容器。
@@ -77,7 +94,14 @@ func bindType[T any](c *Container, f func(*Container) (any, error), shared bool)
 	t := typeKey[T]()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.providers[t] = &binding{factory: f, shared: shared}
+	// 拷贝写时快照（COW）：避免影响已发布的旧快照读者。
+	cur := c.providers.Load()
+	p := make(map[reflect.Type]*binding, len(*cur)+1)
+	for k, v := range *cur {
+		p[k] = v
+	}
+	p[t] = &binding{factory: f, shared: shared}
+	c.providers.Store(&p)
 }
 
 // typeKey 返回类型 T 的反射类型，作为容器键。
@@ -94,10 +118,13 @@ func Resolve[T any](c *Container) (T, error) {
 	var zero T
 	t := typeKey[T]()
 
-	c.mu.RLock()
-	b, ok := c.providers[t]
+	p := c.providers.Load()
+	var b *binding
+	var ok bool
+	if p != nil {
+		b, ok = (*p)[t]
+	}
 	parent := c.parent
-	c.mu.RUnlock()
 	if !ok {
 		if parent != nil {
 			return Resolve[T](parent)
@@ -150,9 +177,11 @@ func MustResolve[T any](c *Container) T {
 // Has 判断类型 T 是否已绑定。
 func Has[T any](c *Container) bool {
 	t := typeKey[T]()
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	_, ok := c.providers[t]
+	p := c.providers.Load()
+	if p == nil {
+		return false
+	}
+	_, ok := (*p)[t]
 	return ok
 }
 
@@ -181,7 +210,8 @@ func (c *Container) Close() error {
 func (c *Container) Reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.providers = make(map[reflect.Type]*binding, 16)
+	p := make(map[reflect.Type]*binding, 16)
+	c.providers.Store(&p)
 	c.constructed = nil
 	c.closed = false
 }
@@ -190,5 +220,10 @@ func (c *Container) Reset() {
 func (c *Container) String() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return fmt.Sprintf("Container(%d services)", len(c.providers))
+	p := c.providers.Load()
+	n := 0
+	if p != nil {
+		n = len(*p)
+	}
+	return fmt.Sprintf("Container(%d services)", n)
 }

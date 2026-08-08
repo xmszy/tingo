@@ -38,6 +38,9 @@ func CheckStructWithScene(v any, scene string) error {
 
 // CheckStructWithScene 按场景校验结构体。
 func (v *Validator) CheckStructWithScene(obj any, scene string) error {
+	if !v.frozen {
+		v.freeze()
+	}
 	rv := reflect.ValueOf(obj)
 	if rv.Kind() == reflect.Ptr {
 		rv = rv.Elem()
