@@ -27,6 +27,7 @@
 package tvalid
 
 import (
+	"maps"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -145,13 +146,9 @@ func (v *Validator) freeze() {
 		return
 	}
 	nr := make(map[string]RuleFunc, len(v.rules))
-	for k, f := range v.rules {
-		nr[k] = f
-	}
+	maps.Copy(nr, v.rules)
 	nm := make(map[string]string, len(v.msgs))
-	for k, m := range v.msgs {
-		nm[k] = m
-	}
+	maps.Copy(nm, v.msgs)
 	v.frozenRules = nr
 	v.frozenMsgs = nm
 	v.frozen = true
@@ -232,6 +229,11 @@ type structMeta struct {
 	fields   []fieldMeta
 	confirms []confirmInfo
 	formIdx  map[string]int // form tag / snake_case → 字段索引，用于 confirm 查找
+
+	// 标志位：类型是否包含任何需要运行的校验。
+	// 两者皆否时 CheckStruct 可直接短路返回 nil（零开销 fast-path）。
+	hasRule    bool
+	hasConfirm bool
 }
 
 var structCache sync.Map // reflect.Type → *structMeta
@@ -274,6 +276,8 @@ func buildStructMeta(rt reflect.Type) *structMeta {
 		}
 		if f.Type.Kind() == reflect.Struct && !isBasicType(f.Type) {
 			nested := buildStructMeta(f.Type)
+			m.hasRule = m.hasRule || nested.hasRule
+			m.hasConfirm = m.hasConfirm || nested.hasConfirm
 			for _, nf := range nested.fields {
 				cf := nf
 				cf.name = f.Name + "." + nf.name
@@ -282,6 +286,9 @@ func buildStructMeta(rt reflect.Type) *structMeta {
 			}
 			m.confirms = append(m.confirms, nested.confirms...)
 		} else {
+			if len(fm.rules) > 0 {
+				m.hasRule = true
+			}
 			m.fields = append(m.fields, fm)
 		}
 
@@ -290,6 +297,7 @@ func buildStructMeta(rt reflect.Type) *structMeta {
 			if r.Name != "confirm" {
 				continue
 			}
+			m.hasConfirm = true
 			confirmField := formTag
 			if confirmField == "" {
 				confirmField = snakeCase(f.Name)
@@ -323,6 +331,11 @@ func (v *Validator) CheckStruct(obj any) error {
 	}
 	rt := rv.Type()
 	meta := getStructMeta(rt)
+
+	// fast-path：结构体既无校验规则也无 confirm 时直接返回，零开销。
+	if !meta.hasRule && !meta.hasConfirm {
+		return nil
+	}
 
 	var errs Errors
 	for _, fm := range meta.fields {

@@ -106,11 +106,35 @@ func TestCheckStruct_CacheConsistency(t *testing.T) {
 	}
 }
 
+// 无 valid tag / 无 confirm 的结构体应走 fast-path 直接返回 nil，不产生校验开销。
+type plainForm struct {
+	Name  string
+	Email string
+	Age   int
+}
+
+func TestCheckStruct_NoRules_FastPath(t *testing.T) {
+	if err := CheckStruct(&plainForm{Name: "a", Email: "b", Age: 1}); err != nil {
+		t.Fatalf("无规则结构体应直接通过, 实际: %v", err)
+	}
+	if err := CheckStruct(plainForm{Name: "a"}); err != nil {
+		t.Fatalf("非指针无规则结构体也应直接通过, 实际: %v", err)
+	}
+}
+
+func BenchmarkCheckStruct_NoRules(b *testing.B) {
+	f := &plainForm{Name: "a", Email: "b", Age: 1}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = CheckStruct(f)
+	}
+}
+
 // 缓存带来性能收益：重复校验同一类型应显著快于首次解析。
 func BenchmarkCheckStruct(b *testing.B) {
 	u := validUser()
 	b.ReportAllocs()
-	
+
 	for b.Loop() {
 		_ = CheckStruct(u)
 	}
