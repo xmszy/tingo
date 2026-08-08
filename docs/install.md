@@ -5,6 +5,27 @@
 - Go 1.23+
 - 数据库驱动（按需选择）：MySQL/PostgreSQL/SQLite/SQL Server
 
+## 安装 tingo
+
+推荐通过 `go install` 安装命令行工具，安装后即可在任意目录直接使用 `tingo` 命令：
+
+~~~bash
+go install github.com/xmszy/tingo/cmd/tingo@latest
+~~~
+
+安装完成后，请确保 `$GOPATH/bin`（默认 `~/go/bin`）已加入 `PATH` 环境变量。验证安装：
+
+~~~bash
+tingo --version
+~~~
+
+如需本地开发调试，可在仓库内以源码方式运行（见上方「创建项目」中的本地命令），或使用：
+
+~~~bash
+# 在 tingo 仓库内
+go build -o $GOPATH/bin/tingo ./cmd/tingo
+~~~
+
 ## 创建项目
 
 使用 `tingo init` 脚手架命令创建新项目：
@@ -12,15 +33,10 @@
 ~~~bash
 mkdir myproject && cd myproject
 go mod init myproject
-go run github.com/xmszy/tingo/cmd/tingo@latest init
+tingo init
 ~~~
 
-或本地开发时：
 
-~~~bash
-# 在 tingo 仓库内
-go run ./cmd/tingo init myproject
-~~~
 
 ## 目录结构
 

@@ -6,7 +6,7 @@ const tplGomod = `module {{.Module}}
 
 go 1.22
 
-require github.com/xmszy/tingo {{.Version}}
+require github.com/xmszy/tingo
 `
 
 const tplMain = `// Command {{.Name}} 是应用入口。

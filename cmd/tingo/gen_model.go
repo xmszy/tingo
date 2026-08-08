@@ -11,10 +11,6 @@ import (
 	"text/template"
 	"unicode"
 
-	_ "github.com/xmszy/tingo/contrib/drivers/mysql"
-	_ "github.com/xmszy/tingo/contrib/drivers/postgres"
-	_ "github.com/xmszy/tingo/contrib/drivers/sqlite"
-	_ "github.com/xmszy/tingo/contrib/drivers/sqlserver"
 	"github.com/xmszy/tingo/database/tdb"
 )
 

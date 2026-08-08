@@ -4,10 +4,6 @@ import (
 	"context"
 
 	"github.com/xmszy/tingo/os/tcfg"
-	_ "github.com/xmszy/tingo/contrib/drivers/mysql"
-	_ "github.com/xmszy/tingo/contrib/drivers/postgres"
-	_ "github.com/xmszy/tingo/contrib/drivers/sqlite"
-	_ "github.com/xmszy/tingo/contrib/drivers/sqlserver"
 	"github.com/xmszy/tingo/core"
 	"github.com/xmszy/tingo/database/tdb"
 	"github.com/xmszy/tingo/net/thttp"

@@ -100,10 +100,10 @@ DBStore 通过 `db.SQL()` 访问数据库连接池。
 
 ## 会话中间件
 
-通过 `contrib/sessions` 中间件自动管理会话生命周期：
+通过 `tingo-contrib/sessions`（独立模块）中间件自动管理会话生命周期：
 
 ~~~go
-import "github.com/xmszy/tingo/contrib/sessions"
+import "github.com/xmszy/tingo-contrib/sessions"
 
 r.Use(sessions.Middleware(t.Session()))
 ~~~

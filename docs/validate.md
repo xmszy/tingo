@@ -1,11 +1,11 @@
 # 验证
 
-Tingo 的验证组件 `contrib/validate` 提供 Tingo 风格的参数校验。
+Tingo 的验证组件 `tingo-contrib/validate`（独立模块）提供 Tingo 风格的参数校验。
 
 ## 安装
 
 ~~~go
-import "github.com/xmszy/tingo/contrib/validate"
+import "github.com/xmszy/tingo-contrib/validate"
 ~~~
 
 ## 基本用法

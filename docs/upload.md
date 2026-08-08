@@ -88,13 +88,13 @@ func (u *Upload) Image(c *t.Ctx) error {
 
 ## upload 组件
 
-`contrib/upload` 提供带校验的上传辅助，零外部依赖：
+`tingo-contrib/upload`（独立模块）提供带校验的上传辅助，零外部依赖：
 
 ~~~go
 package upload
 
 import (
-    "github.com/xmszy/tingo/contrib/upload"
+    "github.com/xmszy/tingo-contrib/upload"
 )
 
 func (u *Upload) Image(c *t.Ctx) error {

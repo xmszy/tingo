@@ -28,7 +28,7 @@ Tingo 追求高程度封装、优雅高效的写法。Tingo 中的 `$request->pa
 ### 模块化但不过度分层
 
 明确拒绝 GoFrame 的 api/logic/service 分层，采用 Tingo 的 controller/model/service
-简洁结构。组件通过 `contrib/` 独立子模块提供，核心无外部依赖。
+简洁结构。组件通过独立的 `tingo-contrib` 模块（仓库 `github.com/xmszy/tingo-contrib`）提供，核心无外部依赖。
 
 ## 适用的场景
 
