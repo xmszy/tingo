@@ -45,6 +45,12 @@ type Engine struct {
 	// 关闭可省去一层闭包，用于极致性能场景。
 	bindMeta bool
 
+	// appKeyBound 决定是否在入口中间件把 App 写入 gin.Context.Keys。
+	// 该写入会惰性分配 Keys map（每请求 2 alloc / 约 336B）。
+	// 单 App 且 app 即 DefaultApp 时可跳过，由 Framework() 的
+	// DefaultApp() fallback 直接返回，从而消除这部分分配。
+	appKeyBound bool
+
 	// routes 是注册期收集的路由表，用于 CLI 展示与调试。
 	mu     sync.Mutex
 	routes []RouteInfo
@@ -108,16 +114,19 @@ func NewWithApp(app *core.App, opts ...Option) *Engine {
 	}
 
 	e := &Engine{
-		app:      app,
-		gin:      g,
-		cfg:      cfg,
-		options:  append([]Option(nil), opts...),
-		bindMeta: cfg.BindRouteMeta,
-		routes:   make([]RouteInfo, 0, 64),
+		app:         app,
+		gin:         g,
+		cfg:         cfg,
+		options:     append([]Option(nil), opts...),
+		bindMeta:    cfg.BindRouteMeta,
+		appKeyBound: app != core.DefaultApp(),
+		routes:      make([]RouteInfo, 0, 64),
 	}
 
 	g.Use(func(ctx *gin.Context) {
-		core.BindFrameworkApp(core.FromGin(ctx), app)
+		if e.appKeyBound {
+			core.BindFrameworkApp(core.FromGin(ctx), app)
+		}
 		ctx.Next()
 	})
 	e.installNotFound()
