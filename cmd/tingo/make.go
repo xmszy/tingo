@@ -23,6 +23,23 @@ import (
 //	tingo make listener    <Name> [--app index] [--force]
 //	tingo make subscribe   <Name> [--app index] [--force]
 func makeCmd(args []string) {
+	// 帮助优先：-h / --help / help 任意位置都打印用法。
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			// 有具体类型则打印该类型专属帮助，否则打印总览。
+			kind := ""
+			if len(args) >= 1 && args[0] != "-h" && args[0] != "--help" && args[0] != "help" {
+				kind = args[0]
+			}
+			if kind == "" {
+				printMakeUsage()
+			} else {
+				printMakeKindUsage(kind)
+			}
+			os.Exit(0)
+		}
+	}
+
 	if len(args) < 2 {
 		printMakeUsage()
 		os.Exit(2)
@@ -38,8 +55,13 @@ func makeCmd(args []string) {
 		rawName = rawName[at+1:]
 	}
 	name := sanitizeModule(rawName)
+	if name == "" || strings.HasPrefix(rawName, "-") {
+		fmt.Fprintf(os.Stderr, "无效的名称 %q。用法: tingo make %s <Name> [--app ...] [--force]\n", rawName, kind)
+		os.Exit(2)
+	}
 
 	fs := flag.NewFlagSet("make", flag.ExitOnError)
+	fs.Usage = func() { printMakeUsage() }
 	app := fs.String("app", "", "目标应用；留空使用单应用 app/<layer>")
 	api := fs.Bool("api", false, "生成 API 控制器（无 create/edit 方法）")
 	plain := fs.Bool("plain", false, "生成空控制器（仅结构体声明）")
@@ -113,11 +135,11 @@ func makeCmd(args []string) {
 	fmt.Printf("created  %s\n", target)
 }
 
-// printMakeUsage 打印 make 子命令用法。
+// printMakeUsage 打印 make 总览用法（无具体类型时）。
 func printMakeUsage() {
-	fmt.Println(`用法: tingo make <类型> <名称> [选项]
+	fmt.Print(`用法: tingo make <类型> <名称> [选项]
 
-类型:
+类型（查看某类型详情请用：tingo make <类型> -h）：
   app           多应用：生成子应用骨架（app/<名称>/）并维护聚合导入
   controller    资源控制器（7 个 REST 方法）
   model         数据模型（泛型 Model[T]）
@@ -133,15 +155,110 @@ func printMakeUsage() {
   <名称> 内联 @ 应用名    tingo make controller index@User
   --app <应用名>          tingo make controller User --app index
 
-选项:
+通用选项（各类型支持范围见其专属帮助）：
   --app   目标应用名（多应用时必填）
   --api   控制器仅生成 API 方法（无 create/edit）
   --plain 控制器仅生成空结构体
   --force 覆盖已存在的文件
+  --stub  <file>  自定义模板路径（不指定则自动查找 stubs/<类型>.tpl 或用内置模板）
 
-模板自定义:
-  --stub  <file>  直接指定模板文件路径
-                  不指定则自动查找 stubs/<类型>.tpl，找不到用内置模板`)
+示例:
+  tingo make controller User
+  tingo make model Order --app api
+  tingo make event UserRegistered
+`)
+}
+
+// makeKindMeta 描述某类型的专属帮助信息。
+type makeKindMeta struct {
+	title   string // 类型中文名/简述
+	target  string // 生成到哪
+	opts    string // 该类型支持的选项说明（空表示仅通用选项）
+	example string // 典型示例
+}
+
+// makeKindMetas 各类型专属帮助数据。
+func makeKindMetas() map[string]makeKindMeta {
+	return map[string]makeKindMeta{
+		"app": {
+			title:   "多应用：生成子应用骨架并维护聚合导入",
+			target:  "app/<名称>/{controller,model,...} 以及聚合入口",
+			opts:    "  --force  覆盖已存在的文件\n  --stub  <file>  自定义模板路径",
+			example: "  tingo make app api",
+		},
+		"controller": {
+			title:   "资源控制器（REST 风格 7 个方法：Index/Create/Store/Show/Edit/Update/Destroy）",
+			target:  "app/controller/<Name>.go（多应用：app/<app>/controller/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --api    仅生成 API 方法（无 Create/Edit 视图）\n  --plain  仅生成空结构体（无方法）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make controller User\n  tingo make controller User --api\n  tingo make controller Post --app blog",
+		},
+		"model": {
+			title:   "数据模型（泛型 Model[T]，含字段、表名、时间戳）",
+			target:  "app/model/<Name>.go（多应用：app/<app>/model/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make model Order\n  tingo make model User --app api",
+		},
+		"middleware": {
+			title:   "HTTP 中间件（func(http.Handler) http.Handler）",
+			target:  "app/middleware/<Name>.go（多应用：app/<app>/middleware/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make middleware Auth",
+		},
+		"validate": {
+			title:   "校验规则（结构体验证器，配合 validate 包使用）",
+			target:  "app/validate/<Name>.go（多应用：app/<app>/validate/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make validate UserStore",
+		},
+		"service": {
+			title:   "业务服务（无状态服务结构体，承载业务逻辑）",
+			target:  "app/service/<Name>.go（多应用：app/<app>/service/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make service Order",
+		},
+		"command": {
+			title:   "控制台指令（实现 cmd.Command 接口，可被 tingo run 调用）",
+			target:  "app/command/<Name>.go（多应用：app/<app>/command/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make command SendEmails",
+		},
+		"event": {
+			title:   "事件载荷（纯数据结构，承载事件传递的数据）",
+			target:  "app/event/<Name>.go（多应用：app/<app>/event/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make event UserRegistered",
+		},
+		"listener": {
+			title:   "事件监听器（实现 Handle(ctx, event) 的监听者）",
+			target:  "app/listener/<Name>.go（多应用：app/<app>/listener/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make listener SendWelcomeEmail",
+		},
+		"subscribe": {
+			title:   "事件订阅者（将监听器绑定到事件的订阅入口）",
+			target:  "app/subscribe/<Name>.go（多应用：app/<app>/subscribe/<Name>.go）",
+			opts:    "  --app   目标应用名（多应用时必填）\n  --force  覆盖已存在的文件\n  --stub   <file>  自定义模板路径",
+			example: "  tingo make subscribe UserEvents",
+		},
+	}
+}
+
+// printMakeKindUsage 打印某类型的专属帮助。
+func printMakeKindUsage(kind string) {
+	metas := makeKindMetas()
+	m, ok := metas[kind]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "未知类型: %s，支持: %s\n", kind, strings.Join(allMakeKinds(), ", "))
+		os.Exit(2)
+	}
+	fmt.Printf("用法: tingo make %s <名称> [选项]\n\n", kind)
+	fmt.Printf("说明: %s\n", m.title)
+	fmt.Printf("生成: %s\n\n", m.target)
+	fmt.Println("该类型支持的选项:")
+	fmt.Println(m.opts)
+	fmt.Println("\n示例:")
+	fmt.Println(m.example)
+	fmt.Println("\n更多类型请见：tingo make -h")
 }
 
 // allMakeKinds 返回所有支持的生成类型。

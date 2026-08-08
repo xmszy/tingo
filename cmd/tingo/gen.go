@@ -13,8 +13,15 @@ import (
 //	tingo gen model [--connection name] [--tables ...]
 //	tingo gen controller <file>
 func genCmd(args []string) {
+	// 帮助优先：-h / --help / help 任意位置都打印用法。
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			usageGen()
+			os.Exit(0)
+		}
+	}
 	if len(args) < 1 {
-		fmt.Println("usage: tingo gen <model|controller> [args]")
+		usageGen()
 		os.Exit(2)
 	}
 	if args[0] == "model" {
@@ -57,6 +64,23 @@ func genCmd(args []string) {
 		}
 		fmt.Printf("已生成: %s\n", outFile)
 	}
+}
+
+// usageGen 打印 gen 子命令用法。
+func usageGen() {
+	fmt.Print(`用法: tingo gen <类型> [选项]
+
+类型:
+  model       按 config/database.toml 反向生成 app/model 单层模型
+  controller  <file>  从 Go 源文件中的结构体生成资源控制器骨架
+
+示例:
+  tingo gen model                 从默认数据库生成全部表
+  tingo gen model --tables user,order
+  tingo gen controller app/model/user.go
+
+各类型详细选项请使用：tingo gen <类型> -h
+`)
 }
 
 // pkgName 从文件推导包名（启发式：用目录名）。

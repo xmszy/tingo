@@ -27,12 +27,18 @@ import (
 	"os"
 
 	"github.com/xmszy/tingo"
+	"github.com/xmszy/tingo/os/tenv"
 )
 
 // version 默认取自 tingo.Version，可由构建期 -ldflags "-X main.version=..." 覆盖。
 var version = tingo.Version
 
 func main() {
+	// 提前加载 .env / .env.local，使 config/*.toml 中的 ${DB_PASS:-} 等
+	// 环境变量占位符可被展开（与 Web 引擎启动时的行为一致）。
+	// 文件不存在时忽略；已存在的系统环境变量不会被覆盖。
+	_ = tenv.Load(".env", ".env.local")
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)

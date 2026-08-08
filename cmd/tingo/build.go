@@ -30,6 +30,20 @@ var (
 //	         [--platform linux/amd64] [--docker]
 func buildCmd(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Print(`用法: tingo build [选项]
+
+编译当前项目为可执行文件。
+
+选项:
+  --output <dir>     输出目录（默认 bin）
+  --name <name>      可执行文件名（默认取模块名或目录名）
+  --ldflags <args>   传给 go build -ldflags 的参数
+  --platform <os/arch>  交叉编译目标，如 linux/amd64
+  --docker           生成 Dockerfile（配合 --platform 使用）
+  -h, --help         打印本帮助
+`)
+	}
 	outDir := fs.String("output", "bin", "输出目录")
 	name := fs.String("name", "", "可执行文件名（默认取模块名或目录名）")
 	ldflags := fs.String("ldflags", "", "传给 go build -ldflags 的参数")
@@ -120,6 +134,19 @@ func firstModule() string {
 //	tingo serve ...（别名）
 func runCmd(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Print(`用法: tingo run [选项]
+       tingo serve [选项]   （serve 为 run 别名）
+
+编译并运行当前项目。
+
+选项:
+  --addr <addr>      监听地址（默认 :8080）
+  --output <dir>     临时构建目录（默认系统临时目录）
+  --watch            文件变更自动重建并重载（开发模式）
+  -h, --help         打印本帮助
+`)
+	}
 	addr := fs.String("addr", ":8080", "监听地址")
 	outDir := fs.String("output", filepath.Join(os.TempDir(), "tingo-run"), "临时构建目录（默认系统临时目录）")
 	watch := fs.Bool("watch", false, "文件变更自动重建并重载（开发模式，零外部依赖）")
@@ -338,6 +365,14 @@ func testCmd(args []string) {
 //	tingo clean
 func cleanCmd(args []string) {
 	fs := flag.NewFlagSet("clean", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Print(`用法: tingo clean
+
+清理构建产物（bin/、runtime/logs、根目录下的 *.exe 与 *.test 文件）。
+选项:
+  -h, --help   打印本帮助
+`)
+	}
 	fs.Parse(args)
 
 	targets := []string{"bin", "runtime/logs"}
@@ -403,6 +438,16 @@ func goos() string {
 //	tingo route:list [--method GET]
 func routeListCmd(args []string) {
 	fs := flag.NewFlagSet("route:list", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Print(`用法: tingo route:list [选项]
+
+编译当前项目并列出所有已注册路由（打印后退出，不监听端口）。
+
+选项:
+  --method <METHOD>  按请求方法筛选（如 GET、POST）
+  -h, --help         打印本帮助
+`)
+	}
 	method := fs.String("method", "", "按请求方法筛选（如 GET、POST）")
 	fs.Parse(args)
 

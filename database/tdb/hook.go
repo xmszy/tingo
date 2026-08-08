@@ -49,3 +49,8 @@ type AfterQuerier interface {
 type BeforeSaver interface {
 	BeforeSave() error
 }
+
+// AfterSaver 在 Save（INSERT or UPDATE）执行成功后调用。
+type AfterSaver interface {
+	AfterSave() error
+}

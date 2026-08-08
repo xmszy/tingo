@@ -1,7 +1,7 @@
 /runtime/
+bin/
 /bin/
 /.bin/
-/all/
 *.test
 *.out
 *.prof

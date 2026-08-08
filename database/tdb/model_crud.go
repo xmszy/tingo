@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -372,6 +373,12 @@ func (m *Model[T]) Insert(value any) (sql.Result, error) {
 				return res, err
 			}
 		}
+		// AfterSave hook：Save 最终落到 Insert 时，Insert 成功即 Save 成功。
+		if s, ok := value.(AfterSaver); ok {
+			if err := s.AfterSave(); err != nil {
+				return res, err
+			}
+		}
 	}
 	return res, nil
 }
@@ -454,6 +461,58 @@ func (m *Model[T]) InsertIgnore(value any) (sql.Result, error) {
 	return res, nil
 }
 
+// Save 保存记录：若主键非零值（已存在）则执行 Update，否则执行 Insert。
+// 区别于单独调用 Insert/Update：Save 会触发 BeforeSave/AfterSave 钩子，
+// 且依据主键自动路由，适合「有则更新、无则插入」的场景。
+func (m *Model[T]) Save(value any) (sql.Result, error) {
+	if col, pk, ok := primaryKeyOf(value); ok && !isZero(reflect.ValueOf(pk)) {
+		// 已存在记录：以主键为 WHERE 执行 Update，避免全表更新。
+		return m.WhereEQ(col, pk).Update(value)
+	}
+	return m.Insert(value)
+}
+
+// primaryKeyOf 返回 value（struct 或指针）的主键列名与主键值。
+// 主键由 tdb tag 的 primaryKey 标识；无 primaryKey 标记时回退到名为 id 的字段。
+// 用于 Save 按主键路由与生成 WHERE 条件。
+func primaryKeyOf(value any) (col string, pk any, ok bool) {
+	v := reflect.ValueOf(value)
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return "", nil, false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return "", nil, false
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" {
+			continue
+		}
+		tag := f.Tag.Get("tdb")
+		isPK := strings.Contains(tag, "primaryKey")
+		if !isPK && strings.EqualFold(f.Name, "id") && !strings.Contains(tag, "-") {
+			isPK = true
+		}
+		if isPK {
+			col = columnOf(f)
+			return col, v.Field(i).Interface(), true
+		}
+	}
+	return "", nil, false
+}
+
+// hasNonZeroPrimaryKey 判断 value（struct 或指针）的主键列是否为零值。
+// 主键由 tdb tag 的 primaryKey 标识；无 primaryKey 标记时回退到名为 id 的字段。
+// 用于 Save 路由：主键非零视为已存在记录（走 Update），否则走 Insert。
+func hasNonZeroPrimaryKey(value any) bool {
+	_, pk, ok := primaryKeyOf(value)
+	return ok && !isZero(reflect.ValueOf(pk))
+}
+
 // Update 按当前 WHERE 条件更新。value 为 struct（非零字段）或 map[string]any。
 func (m *Model[T]) Update(value any) (sql.Result, error) {
 	// Auto-timestamp（仅 update_time）
@@ -508,6 +567,12 @@ func (m *Model[T]) Update(value any) (sql.Result, error) {
 	if !m.disableHooks {
 		if s, ok := value.(AfterUpdater); ok {
 			if err := s.AfterUpdate(); err != nil {
+				return res, err
+			}
+		}
+		// AfterSave hook：Save 最终落到 Update 时，Update 成功即 Save 成功。
+		if s, ok := value.(AfterSaver); ok {
+			if err := s.AfterSave(); err != nil {
 				return res, err
 			}
 		}

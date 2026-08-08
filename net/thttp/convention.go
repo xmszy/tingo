@@ -100,6 +100,44 @@ func applyDuration(tree tcfg.Reader, path string, target *time.Duration) error {
 	return nil
 }
 
+// validateConventionConfig 校验 HTTP 配置的合法性与一致性，
+// 在 Engine 启动前尽早暴露错误配置（如地址为空、超时为负、TLS 证书不对称）。
 func validateConventionConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.Addr) == "" {
+		return fmt.Errorf("thttp: Addr must not be empty")
+	}
+
+	// 超时时间不应为负：负超时在 http.Server 中是未定义行为，
+	// 会让连接立即超时或永久阻塞，这里提前拦截。
+	if cfg.ReadTimeout < 0 {
+		return fmt.Errorf("thttp: ReadTimeout must not be negative, got %s", cfg.ReadTimeout)
+	}
+	if cfg.ReadHeaderTimeout < 0 {
+		return fmt.Errorf("thttp: ReadHeaderTimeout must not be negative, got %s", cfg.ReadHeaderTimeout)
+	}
+	if cfg.WriteTimeout < 0 {
+		return fmt.Errorf("thttp: WriteTimeout must not be negative, got %s", cfg.WriteTimeout)
+	}
+	if cfg.IdleTimeout < 0 {
+		return fmt.Errorf("thttp: IdleTimeout must not be negative, got %s", cfg.IdleTimeout)
+	}
+	if cfg.ShutdownTimeout < 0 {
+		return fmt.Errorf("thttp: ShutdownTimeout must not be negative, got %s", cfg.ShutdownTimeout)
+	}
+
+	// TLS 证书应成对出现：仅配置其一会导致 HTTPS 启动失败。
+	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
+		return fmt.Errorf("thttp: CertFile and KeyFile must be set together for HTTPS")
+	}
+
+	// 若绑定路由元信息，则上下文会依赖 Ctx.App/Controller/Action，
+	// 此处无需校验；但内存/头字节上限为负无意义。
+	if cfg.MaxHeaderBytes < 0 {
+		return fmt.Errorf("thttp: MaxHeaderBytes must not be negative, got %d", cfg.MaxHeaderBytes)
+	}
+	if cfg.MaxMultipartMemory < 0 {
+		return fmt.Errorf("thttp: MaxMultipartMemory must not be negative, got %d", cfg.MaxMultipartMemory)
+	}
+
 	return nil
 }

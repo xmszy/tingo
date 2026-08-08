@@ -296,3 +296,56 @@ func TestSafeUnsafeDefault(t *testing.T) {
 		t.Fatalf("unsafe default should modify in place: %q", sql)
 	}
 }
+
+// saveProbe 字段对齐 User，并实现 AfterSaver，用于观测 Save 的 AfterSave 钩子触发次数。
+type saveProbe struct {
+	Id        int    `tdb:"id"`
+	Name      string `tdb:"name"`
+	Age       int    `tdb:"age"`
+	Email     string `tdb:"email"`
+	afterSave int    // 钩子触发计数
+}
+
+// AfterSave 实现 AfterSaver 接口，累计触发次数。
+func (p *saveProbe) AfterSave() error { p.afterSave++; return nil }
+
+// TableName 让 tdb 能推断表名（与 User 同表）。
+func (saveProbe) TableName() string { return "user" }
+
+// TestSaveRoutesAndFiresAfterSave 验证 Save：主键零值走 Insert、非零走 Update，
+// 且两种路径都触发 AfterSave 钩子。
+func TestSaveRoutesAndFiresAfterSave(t *testing.T) {
+	db := openMem(t)
+	defer db.Close()
+	m := NewModel[saveProbe](db, "user")
+
+	// 主键为零值 → Insert（给一个非零字段，便于分解出插入列）
+	sp := &saveProbe{Name: "new"}
+	if _, err := m.Save(sp); err != nil {
+		t.Fatal(err)
+	}
+	// 主键非零值 → Update（需先有该记录）
+	seedTable("test", "user", map[string]any{"id": 1, "name": "alice", "age": 30, "email": "a@x.com"})
+	sp.Id = 1
+	sp.Name = "alice2"
+	if _, err := m.Save(sp); err != nil {
+		t.Fatal(err)
+	}
+
+	if sp.afterSave != 2 {
+		t.Fatalf("AfterSave should fire on both Insert and Update paths, got %d", sp.afterSave)
+	}
+
+	// 验证更新生效：id=1 的 name 应为 alice2
+	memMu.Lock()
+	var updatedName string
+	for _, r := range memStore["test"]["user"] {
+		if fmt.Sprintf("%v", r["id"]) == "1" {
+			updatedName = fmt.Sprintf("%v", r["name"])
+		}
+	}
+	memMu.Unlock()
+	if updatedName != "alice2" {
+		t.Fatalf("Save->Update did not apply, name=%q", updatedName)
+	}
+}
