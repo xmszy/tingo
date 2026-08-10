@@ -1,6 +1,7 @@
 package tdb
 
 import (
+	"context"
 	"database/sql"
 )
 
@@ -21,14 +22,28 @@ func (tx *Tx) Commit() error { return tx.tx.Commit() }
 // Rollback 回滚。
 func (tx *Tx) Rollback() error { return tx.tx.Rollback() }
 
-// query 在事务上执行查询。
-func (tx *Tx) query(sqlStr string, args ...any) (*sql.Rows, error) {
-	return tx.tx.Query(sqlStr, args...)
-}
-
 func (tx *Tx) exec(sqlStr string, args ...any) (sql.Result, error) {
 	if tx.db.readOnly() {
 		return nil, ErrReadOnly
 	}
 	return tx.tx.Exec(sqlStr, args...)
+}
+
+// queryCtx 支持 context 的查询（ctx 为 nil 时退化为普通 Query）。
+func (tx *Tx) queryCtx(ctx context.Context, sqlStr string, args ...any) (*sql.Rows, error) {
+	if ctx == nil {
+		return tx.tx.Query(sqlStr, args...)
+	}
+	return tx.tx.QueryContext(ctx, sqlStr, args...)
+}
+
+// execCtx 支持 context 的执行（ctx 为 nil 时退化为普通 Exec）。
+func (tx *Tx) execCtx(ctx context.Context, sqlStr string, args ...any) (sql.Result, error) {
+	if tx.db.readOnly() {
+		return nil, ErrReadOnly
+	}
+	if ctx == nil {
+		return tx.tx.Exec(sqlStr, args...)
+	}
+	return tx.tx.ExecContext(ctx, sqlStr, args...)
 }

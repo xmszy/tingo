@@ -51,6 +51,16 @@ func (v *Validator) CheckStructWithScene(obj any, scene string) error {
 	rt := rv.Type()
 
 	var errs Errors
+	data := make(map[string]any, rt.NumField())
+	for i := 0; i < rt.NumField(); i++ {
+		if rt.Field(i).IsExported() {
+			name := rt.Field(i).Name
+			if l := rt.Field(i).Tag.Get("label"); l != "" {
+				name = l
+			}
+			data[name] = rv.Field(i).Interface()
+		}
+	}
 	for i := 0; i < rt.NumField(); i++ {
 		field := rt.Field(i)
 		if !field.IsExported() {
@@ -74,7 +84,7 @@ func (v *Validator) CheckStructWithScene(obj any, scene string) error {
 		}
 
 		for _, rule := range fieldRules {
-			if err := v.checkRule(fieldName, rule, value); err != nil {
+			if err := v.checkRule(fieldName, rule, value, data); err != nil {
 				errs = append(errs, err)
 			}
 		}

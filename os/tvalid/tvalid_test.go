@@ -154,3 +154,54 @@ func TestCheckStruct_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// ──────────────── 跨字段/区间规则 ────────────────
+
+func TestCrossRules(t *testing.T) {
+	// same 失败：pwd != confirm_pwd
+	bad := &struct {
+		Pwd    string `valid:"required|same:confirm_pwd" label:"pwd"`
+		Confirm string `valid:"required" label:"confirm_pwd"`
+	}{Pwd: "a", Confirm: "b"}
+	if err := CheckStruct(bad); err == nil {
+		t.Fatal("same 应当失败")
+	}
+	// same 通过
+	good := &struct {
+		Pwd    string `valid:"required|same:confirm_pwd" label:"pwd"`
+		Confirm string `valid:"required" label:"confirm_pwd"`
+	}{Pwd: "a", Confirm: "a"}
+	if err := CheckStruct(good); err != nil {
+		t.Fatalf("same 应通过, 实际: %v", err)
+	}
+	// gte 失败：age < min_age
+	badGte := &struct {
+		Age    int `valid:"gte:min_age" label:"age"`
+		MinAge int `valid:"required" label:"min_age"`
+	}{Age: 10, MinAge: 20}
+	if err := CheckStruct(badGte); err == nil {
+		t.Fatal("gte 应当失败")
+	}
+	// gte 通过
+	goodGte := &struct {
+		Age    int `valid:"gte:min_age" label:"age"`
+		MinAge int `valid:"required" label:"min_age"`
+	}{Age: 20, MinAge: 20}
+	if err := CheckStruct(goodGte); err != nil {
+		t.Fatalf("gte 应通过, 实际: %v", err)
+	}
+	// date-range 失败：超出区间
+	badDate := &struct {
+		Start string `valid:"date-range:2020-01-01,2030-12-31" label:"start"`
+	}{Start: "2000-01-01"}
+	if err := CheckStruct(badDate); err == nil {
+		t.Fatal("date-range 应当失败")
+	}
+	// date-range 通过
+	goodDate := &struct {
+		Start string `valid:"date-range:2020-01-01,2030-12-31" label:"start"`
+	}{Start: "2025-06-01"}
+	if err := CheckStruct(goodDate); err != nil {
+		t.Fatalf("date-range 应通过, 实际: %v", err)
+	}
+}

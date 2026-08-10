@@ -12,17 +12,17 @@ import (
 // runQuery 在 DB 或 Tx 上执行查询。
 func (m *Model[T]) runQuery(sqlStr string, args ...any) (*sql.Rows, error) {
 	if m.tx != nil {
-		return m.tx.query(sqlStr, args...)
+		return m.tx.queryCtx(m.ctx, sqlStr, args...)
 	}
-	return m.db.query(sqlStr, args...)
+	return m.db.queryCtx(m.ctx, m.useMaster, sqlStr, args...)
 }
 
-// runExec 在 DB 或 Tx 上执行写操作。
+// runExec 在 DB 或 Tx 上执行写操作（始终走主库）。
 func (m *Model[T]) runExec(sqlStr string, args ...any) (sql.Result, error) {
 	if m.tx != nil {
-		return m.tx.exec(sqlStr, args...)
+		return m.tx.execCtx(m.ctx, sqlStr, args...)
 	}
-	return m.db.exec(sqlStr, args...)
+	return m.db.execCtx(m.ctx, sqlStr, args...)
 }
 
 // buildSelect 组装 SELECT 语句与参数（占位符按方言风格）。
@@ -33,7 +33,24 @@ func (m *Model[T]) buildSelect() (string, []any) {
 		b.WriteString("DISTINCT ")
 	}
 	if len(m.fields) == 0 {
-		b.WriteString("*")
+		if len(m.fieldsEx) == 0 {
+			b.WriteString("*")
+		} else {
+			// 基于模型 T 的列清单排除指定列
+			excluded := toSet(m.fieldsEx)
+			all := metaFor(reflect.TypeOf(newZero[T]()).Elem()).allColumns()
+			kept := make([]string, 0, len(all))
+			for _, c := range all {
+				if !excluded[c] {
+					kept = append(kept, c)
+				}
+			}
+			quoted := make([]string, len(kept))
+			for i, f := range kept {
+				quoted[i] = m.dial.Quote(f)
+			}
+			b.WriteString(strings.Join(quoted, ", "))
+		}
 	} else {
 		quoted := make([]string, len(m.fields))
 		for i, f := range m.fields {
@@ -49,6 +66,10 @@ func (m *Model[T]) buildSelect() (string, []any) {
 	args = append(args, m.appendGroups(&b)...)
 	m.appendOrders(&b)
 	b.WriteString(m.dial.Limit(m.limitN, m.offsetN))
+	if m.lock != "" {
+		b.WriteString(" ")
+		b.WriteString(m.lock)
+	}
 	return b.String(), args
 }
 
@@ -503,14 +524,6 @@ func primaryKeyOf(value any) (col string, pk any, ok bool) {
 		}
 	}
 	return "", nil, false
-}
-
-// hasNonZeroPrimaryKey 判断 value（struct 或指针）的主键列是否为零值。
-// 主键由 tdb tag 的 primaryKey 标识；无 primaryKey 标记时回退到名为 id 的字段。
-// 用于 Save 路由：主键非零视为已存在记录（走 Update），否则走 Insert。
-func hasNonZeroPrimaryKey(value any) bool {
-	_, pk, ok := primaryKeyOf(value)
-	return ok && !isZero(reflect.ValueOf(pk))
 }
 
 // Update 按当前 WHERE 条件更新。value 为 struct（非零字段）或 map[string]any。

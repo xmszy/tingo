@@ -157,6 +157,9 @@ func (v *Validator) freeze() {
 // RuleFunc 规则函数：值→错误信息（空=nil 表示通过）。
 type RuleFunc func(value any, args []string) error
 
+// std 包级默认校验器，供 Quick 系列便捷函数使用。
+var std = New()
+
 // New 创建校验器。
 func New() *Validator {
 	v := &Validator{
@@ -201,7 +204,7 @@ func (v *Validator) Check(data map[string]any, ruleSpec RuleSpec) error {
 			continue
 		}
 		for _, rule := range fieldRules {
-			if err := v.checkRule(field, rule, value); err != nil {
+			if err := v.checkRule(field, rule, value, data); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -338,6 +341,11 @@ func (v *Validator) CheckStruct(obj any) error {
 	}
 
 	var errs Errors
+	// 构造字段值映射，供联合规则（required-with 等）关联判断，key 使用 label/字段名。
+	data := make(map[string]any, len(meta.fields))
+	for _, fm := range meta.fields {
+		data[fm.label] = rv.Field(fm.index).Interface()
+	}
 	for _, fm := range meta.fields {
 		if len(fm.rules) == 0 {
 			continue
@@ -347,7 +355,7 @@ func (v *Validator) CheckStruct(obj any) error {
 			if rule.Name == "confirm" {
 				continue // confirm 统一处理
 			}
-			if err := v.checkRule(fm.label, rule, value); err != nil {
+			if err := v.checkRule(fm.label, rule, value, data); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -386,20 +394,34 @@ func equalValue(a, b any) bool {
 	return toString(a) == toString(b)
 }
 
-func (v *Validator) checkRule(field string, rule Rule, value any) *Error {
+func (v *Validator) checkRule(field string, rule Rule, value any, data map[string]any) *Error {
+	// 联合规则优先：需要访问整份数据做关联判断（如 required-with）。
+	if fn, ok := ruleFuncCtx[rule.Name]; ok {
+		if err := fn(value, rule.Args, data); err != nil {
+			msg := replaceByMap(messageFor(rule.Name, v.frozenMsgs[rule.Name]),
+				map[string]string{
+					"field": field,
+					"rule":  rule.Name,
+					"args":  strings.Join(rule.Args, ","),
+					"value": fmt.Sprintf("%v", value),
+				})
+			return &Error{Field: field, Rule: rule.Name, Message: msg}
+		}
+		return nil
+	}
+
 	fn, ok := v.frozenRules[rule.Name]
 	if !ok {
 		return &Error{Field: field, Rule: rule.Name, Message: "unknown rule: " + rule.Name}
 	}
 	if err := fn(value, rule.Args); err != nil {
-		msg := err.Error()
-		if tpl, ex := v.frozenMsgs[rule.Name]; ex {
-			msg = tpl
-			// 简单模板替换
-			msg = strings.ReplaceAll(msg, "{field}", field)
-			msg = strings.ReplaceAll(msg, "{rule}", rule.Name)
-			msg = strings.ReplaceAll(msg, "{args}", strings.Join(rule.Args, ","))
-		}
+		msg := replaceByMap(messageFor(rule.Name, v.frozenMsgs[rule.Name]),
+			map[string]string{
+				"field": field,
+				"rule":  rule.Name,
+				"args":  strings.Join(rule.Args, ","),
+				"value": fmt.Sprintf("%v", value),
+			})
 		return &Error{Field: field, Rule: rule.Name, Message: msg}
 	}
 	return nil

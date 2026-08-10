@@ -161,14 +161,16 @@ func (s *memStmt) querySelect(q string, args []driver.Value) (driver.Rows, error
 	if wi := strings.Index(strings.ToUpper(rest), " WHERE "); wi >= 0 {
 		table = rest[:wi]
 		after := rest[wi+len(" WHERE "):]
-		// 截取 where 直到 ORDER/LIMIT
+		// 截取 where 直到 ORDER/LIMIT（取二者中较早者）
 		end := len(after)
 		if oi := strings.Index(strings.ToUpper(after), " ORDER BY "); oi >= 0 {
-			end = oi
+			if oi < end {
+				end = oi
+			}
 			orderBy = strings.TrimSpace(after[oi+len(" ORDER BY "):])
 		}
 		if li := strings.Index(strings.ToUpper(after), " LIMIT "); li >= 0 {
-			if end > li {
+			if li < end {
 				end = li
 			}
 			seg := after[li+len(" LIMIT "):]
@@ -186,7 +188,15 @@ func (s *memStmt) querySelect(q string, args []driver.Value) (driver.Rows, error
 			orderBy = strings.TrimSpace(rest[oi+len(" ORDER BY "):])
 		}
 		if li := strings.Index(strings.ToUpper(rest), " LIMIT "); li >= 0 {
-			table = rest[:li]
+			// 保留 table 前缀，但解析并应用 limit/offset
+			seg := rest[li+len(" LIMIT "):]
+			if sp := strings.Index(seg, " OFFSET "); sp >= 0 {
+				limit, _ = strconv.Atoi(strings.TrimSpace(seg[:sp]))
+				offset, _ = strconv.Atoi(strings.TrimSpace(seg[sp+len(" OFFSET "):]))
+			} else {
+				limit, _ = strconv.Atoi(strings.TrimSpace(seg))
+			}
+			// 移除 LIMIT 段对 table 的影响（table 已在 ORDER BY 前截好）
 		}
 	}
 	table = tableRef(table)
@@ -294,7 +304,7 @@ func (r *memRows) Next(dest []driver.Value) error {
 func (s *memStmt) execInsert(q string, args []driver.Value) (driver.Result, error) {
 	memMu.Lock()
 	defer memMu.Unlock()
-	// INSERT INTO t (c1, c2) VALUES (?, ?)
+	// INSERT INTO t (c1, c2) VALUES (?, ?)[, (?, ?)]...  支持单值/多值。
 	if memStore[s.conn.name] == nil {
 		memStore[s.conn.name] = map[string][]map[string]any{}
 	}
@@ -306,22 +316,55 @@ func (s *memStmt) execInsert(q string, args []driver.Value) (driver.Result, erro
 	for _, c := range strings.Split(colsPart, ",") {
 		cols = append(cols, tableRef(strings.TrimSpace(c)))
 	}
-	row := map[string]any{}
-	for i, c := range cols {
-		row[c] = stripVal(args[i])
-	}
-	// 自增 id 模拟
-	maxID := 0
-	for _, r := range memStore[s.conn.name][table] {
-		if id, ok := r["id"].(int); ok && id > maxID {
-			maxID = id
+
+	// 解析所有 (?,?) 分组
+	valuesSection := q[strings.Index(q, ") VALUES")+len(") VALUES"):]
+	var groups []string
+	depth := 0
+	start := -1
+	for i, r := range valuesSection {
+		switch r {
+		case '(':
+			if depth == 0 {
+				start = i + 1
+			}
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				groups = append(groups, valuesSection[start:i])
+				start = -1
+			}
 		}
 	}
-	if _, ok := row["id"]; !ok {
-		row["id"] = maxID + 1
+
+	n := 0
+	argIdx := 0
+	for _, g := range groups {
+		parts := strings.Split(g, ",")
+		row := map[string]any{}
+		for i, c := range cols {
+			if argIdx >= len(args) {
+				break
+			}
+			row[c] = stripVal(args[argIdx])
+			argIdx++
+			_ = parts[i]
+		}
+		// 自增 id 模拟
+		maxID := 0
+		for _, r := range memStore[s.conn.name][table] {
+			if id, ok := r["id"].(int); ok && id > maxID {
+				maxID = id
+			}
+		}
+		if _, ok := row["id"]; !ok {
+			row["id"] = maxID + 1
+		}
+		memStore[s.conn.name][table] = append(memStore[s.conn.name][table], row)
+		n++
 	}
-	memStore[s.conn.name][table] = append(memStore[s.conn.name][table], row)
-	return &memResult{lastID: intVal(row["id"]), rows: 1}, nil
+	return &memResult{lastID: 0, rows: n}, nil
 }
 
 func (s *memStmt) execUpdate(q string, args []driver.Value) (driver.Result, error) {
@@ -431,16 +474,6 @@ func stripVal(v driver.Value) any {
 		return nil
 	}
 	return v
-}
-func intVal(v any) int {
-	switch x := v.(type) {
-	case int:
-		return x
-	case int64:
-		return int(x)
-	default:
-		return 0
-	}
 }
 
 // seedTable 测试辅助：向内存库预置数据。

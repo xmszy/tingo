@@ -14,6 +14,9 @@ var (
 	ErrNoRows = errors.New("tdb: no rows in result set")
 	// ErrInvalidTable 表示无法推断表名且未显式提供。
 	ErrInvalidTable = errors.New("tdb: cannot infer table name; pass table explicitly")
+	// ErrInvalidValue 表示传入的参数值类型/结构不合法（如 BatchInsert 非切片、
+	// ScanList 目标非切片指针等）。
+	ErrInvalidValue = errors.New("tdb: invalid value: type or structure not supported")
 	// ErrNoWhere 表示无 WHERE 条件尝试整表写操作（需 AllowAll 显式解除）。
 	ErrNoWhere = errors.New("tdb: update/delete without WHERE is forbidden; call AllowAll() to confirm")
 	// ErrTableNotFound 表示反向工程时表不存在或无列。

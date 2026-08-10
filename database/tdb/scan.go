@@ -22,6 +22,15 @@ type structMeta struct {
 	softDeleteCol string        // 软删除列名（空=无）
 }
 
+// allColumns 返回模型包含的全部列名（用于 FieldsEx 排除场景）。
+func (sm *structMeta) allColumns() []string {
+	cols := make([]string, 0, len(sm.fields))
+	for _, f := range sm.fields {
+		cols = append(cols, f.column)
+	}
+	return cols
+}
+
 var (
 	metaMu      sync.RWMutex
 	metaCache   = map[reflect.Type]*structMeta{}
@@ -126,6 +135,32 @@ func rowsToModels[T any](rows *sql.Rows) ([]T, error) {
 			}
 		}
 		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// rowsToMaps 扫描所有行，返回 []map[string]any（列名→值）。用于 ScanList 等
+// 需要在内存中按关联键重新组装的场景。
+func rowsToMaps(rows *sql.Rows) ([]map[string]any, error) {
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	var out []map[string]any
+	for rows.Next() {
+		ptrs := make([]any, len(cols))
+		for i := range cols {
+			ptrs[i] = new(any)
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		m := make(map[string]any, len(cols))
+		for i, c := range cols {
+			m[c] = *(ptrs[i].(*any))
+		}
+		out = append(out, m)
 	}
 	return out, rows.Err()
 }

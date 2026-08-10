@@ -1,6 +1,7 @@
 package tdb
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"time"
@@ -80,6 +81,15 @@ type Model[T any] struct {
 	cacheKey     string
 	cacheTTL     time.Duration
 	cacheEnabled bool
+
+	// 悲观锁子句（如 "FOR UPDATE"），仅对 SELECT 生效。
+	lock string
+	// 排除列（FieldsEx），与 fields 互斥（fields 优先）。
+	fieldsEx []string
+	// 查询上下文（用于超时/取消透传），nil 表示不携带。
+	ctx context.Context
+	// 强制走主库读（读写分离场景下，默认读走从库；事务内自动走主库）。
+	useMaster bool
 }
 
 // AutoTimestamp 启用自动时间戳（列名为蛇形，如 "create_time"、"update_time"）。
@@ -244,6 +254,12 @@ func (m *Model[T]) Clone() *Model[T] {
 	c.limitN = m.limitN
 	c.offsetN = m.offsetN
 	c.distinct = m.distinct
+	c.lock = m.lock
+	if len(m.fieldsEx) > 0 {
+		c.fieldsEx = append([]string(nil), m.fieldsEx...)
+	}
+	c.ctx = m.ctx
+	c.useMaster = m.useMaster
 	return c
 }
 
@@ -268,6 +284,34 @@ func (m *Model[T]) Fields(cols ...string) *Model[T] {
 		return model
 	}
 	model.fields = append(model.fields, cols...)
+	return model
+}
+
+// FieldsEx 排除指定列（其余列参与 SELECT）。与 Fields 互斥——同时调用时 Fields 优先生效。
+// 空参数重置为不排除（即 *）。
+func (m *Model[T]) FieldsEx(cols ...string) *Model[T] {
+	model := m.getModel()
+	if len(cols) == 0 {
+		model.fieldsEx = nil
+		return model
+	}
+	model.fieldsEx = append(model.fieldsEx, cols...)
+	return model
+}
+
+// Ctx 为当前查询绑定 context.Context（用于超时/取消透传）。返回新的 Model 副本，
+// 不修改原 Model。仅在底层驱动支持 Context 调用时生效（已支持 *sql.DB/Tx）。
+func (m *Model[T]) Ctx(ctx context.Context) *Model[T] {
+	model := m.getModel()
+	model.ctx = ctx
+	return model
+}
+
+// Master 强制本次查询走主库（读写分离场景下，默认 SELECT 走从库）。
+// 适用于刚写入后需立即读到的强一致场景。返回新的 Model 副本。
+func (m *Model[T]) Master() *Model[T] {
+	model := m.getModel()
+	model.useMaster = true
 	return model
 }
 
