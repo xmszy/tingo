@@ -3,6 +3,7 @@ package middleware
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,9 @@ type LoggerConfig struct {
 	Log *tlog.Logger
 	// SkipPaths 是不记录日志的路径集合，如健康检查。
 	SkipPaths []string
+	// SkipNotFound 为 true 时，未命中路由的 404/405 响应不写访问日志。
+	// 默认开启，可避免探测/扫描/DDoS 类噪声在日志中放大；如需审计所有请求置为 false。
+	SkipNotFound bool
 	// Colored 决定是否输出 ANSI 颜色。
 	Colored bool
 	// Formatter 自定义日志行格式。
@@ -66,8 +70,9 @@ func LoggerWithLog(l *tlog.Logger) func(*LoggerConfig) {
 }
 
 type compiledLoggerConfig struct {
-	config LoggerConfig
-	skip   map[string]struct{}
+	config       LoggerConfig
+	skip         map[string]struct{}
+	skipNotFound bool
 }
 
 // AccessLogger 是可在 Boot 阶段原子注入配置的访问日志处理器。
@@ -89,10 +94,14 @@ func (l *AccessLogger) ConfigureFromTree(reader tcfg.Reader) error {
 	if err != nil {
 		return err
 	}
+	// skip_not_found 默认开启：未命中路由的 404/405 不写访问日志，
+	// 避免探测/扫描/DDoS 类噪声在日志中放大。显式配置 false 可审计全部请求。
+	skipNotFound := reader.Bool("log.access.skip_not_found", true)
 	l.Configure(LoggerConfig{
-		Log:       logger,
-		SkipPaths: reader.Strings("log.access.skip_paths"),
-		Colored:   false,
+		Log:         logger,
+		SkipPaths:   reader.Strings("log.access.skip_paths"),
+		SkipNotFound: skipNotFound,
+		Colored:     false,
 	})
 	return nil
 }
@@ -121,7 +130,7 @@ func compileLogger(config LoggerConfig) *compiledLoggerConfig {
 			config.Formatter = plainLine
 		}
 	}
-	return &compiledLoggerConfig{config: config, skip: skip}
+	return &compiledLoggerConfig{config: config, skip: skip, skipNotFound: config.SkipNotFound}
 }
 
 func loggerHandler(load func() *compiledLoggerConfig) core.Handler {
@@ -140,6 +149,10 @@ func loggerHandler(load func() *compiledLoggerConfig) core.Handler {
 		start := time.Now()
 		raw := c.RawQuery()
 		c.Next()
+		// 未命中路由的 404/405 默认不记日志，避免探测/扫描噪声放大。
+		if compiled.skipNotFound && (c.Res().Status() == http.StatusNotFound || c.Res().Status() == http.StatusMethodNotAllowed) {
+			return
+		}
 		if raw != "" {
 			path += "?" + raw
 		}

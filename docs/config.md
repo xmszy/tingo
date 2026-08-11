@@ -114,8 +114,13 @@ async = true
 
 [access]
 enabled = true
-skip_paths = ["/detect/version"]
+skip_paths = []                   # 跳过记录的路径列表，默认空即可
+skip_not_found = true
 ~~~
+
+`access.skip_paths`（默认 `[]`）：显式跳过记录的路径列表（如健康检查 `/health`）。由于 `skip_not_found` 已默认过滤所有 404/405，**浏览器/探针探测（如 `/detect/version`、Chrome DevTools 的 `/.well-known/appspecific/com.chrome.devtools.json`）作为 404 已被默认静默**，通常无需在此配置。
+
+`access.skip_not_found`（默认 `true`）：未命中路由的 404/405 响应不写访问日志，避免浏览器/探针探测、端口扫描、DDoS 类噪声在日志中放大。需要审计所有请求（含 404）时设为 `false`。
 
 ## Session 配置 session.toml
 
