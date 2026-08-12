@@ -24,10 +24,11 @@ var faviconBytes = []byte{
 
 // initCmd 根据项目名称创建项目脚手架。
 //
-//	tingo init <name>
+//	tingo init <name>            以 <name> 创建子目录并生成脚手架
+//	tingo init .                 在当前目录就地初始化（模块名取当前目录名）
 //
-// name 同时作为目录名和 Go 模块名。
-// 生成的目录结构（对齐 all/tp 骨架）：
+// name 同时作为目录名和 Go 模块名；`.` 表示就地初始化，模块名/目录名取当前工作目录名。
+// 生成的目录结构（对齐 all/tp 骨架，就地模式时前缀为当前目录）：
 //
 //	<name>/
 //	  go.mod
@@ -87,10 +88,30 @@ func initCmd(args []string) {
 		os.Exit(2)
 	}
 	name := args[0]
-	if strings.HasPrefix(name, "-") {
-		fmt.Fprintf(os.Stderr, "无效的项目名称 %q。用法: tingo init <name>\n", name)
+	if err := validateProjectName(name); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n用法: tingo init <name>  或  tingo init . (就地初始化)\n", err)
 		os.Exit(2)
 	}
+
+	// 就地初始化：tingo init . 以当前目录名作为项目名，在当前目录生成文件。
+	inPlace := name == "." || name == "./" || name == string(os.PathSeparator)
+	var root string
+	if inPlace {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "获取当前目录失败: %v\n", err)
+			os.Exit(1)
+		}
+		name = filepath.Base(cwd)
+		if err := validateProjectName(name); err != nil {
+			fmt.Fprintf(os.Stderr, "当前目录名 %q 不符合项目名规范: %v\n", name, err)
+			os.Exit(2)
+		}
+		root = "."
+	} else {
+		root = name
+	}
+	mod := sanitizeModule(name)
 
 	// 多应用模式开关。
 	multiApp := false
@@ -104,12 +125,15 @@ func initCmd(args []string) {
 		}
 	}
 
-	// 以项目名创建子目录。
-	root := name
-	mod := sanitizeModule(name)
-
-	// 检查目标目录是否非空。
-	if entries, err := os.ReadDir(root); err == nil && len(entries) > 0 {
+	// 检查目标目录是否已初始化，避免覆盖。
+	// 就地模式（root="."）目录本就非空，只校验是否已有 go.mod；
+	// 子目录模式仍要求目标目录为空，避免误覆盖。
+	if inPlace {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			fmt.Fprintf(os.Stderr, "当前目录已存在 go.mod，放弃初始化以避免覆盖。\n")
+			os.Exit(1)
+		}
+	} else if entries, err := os.ReadDir(root); err == nil && len(entries) > 0 {
 		fmt.Fprintf(os.Stderr, "目录 %q 非空，放弃初始化以避免覆盖。\n", root)
 		os.Exit(1)
 	}
@@ -281,6 +305,7 @@ func initCmd(args []string) {
   tingo make controller <name>   生成控制器
   tingo make app <name>          新增子应用（多应用模式）
   tingo init <name> --multi-app  生成 index/admin 多应用骨架
+  tingo init . --multi-app        在当前目录就地生成多应用骨架
 `)
 }
 
@@ -318,6 +343,47 @@ func usageInit() {
   tingo init blog              → 创建 blog/ 目录并生成单应用项目
   tingo init blog --multi-app  → 生成 blog/ 多应用骨架（index/admin）`)
 	os.Exit(0)
+}
+
+// validateProjectName 校验 init 输入的项目名是否合法。
+// 就地初始化标记（.、./、/）直接放行，由调用方转为当前目录名处理；
+// 其余名称须为安全、可被 Go 接受的模块名片段。
+func validateProjectName(name string) error {
+	// 就地初始化占位符合法，具体名称后续取目录名再校验。
+	if name == "." || name == "./" || name == string(os.PathSeparator) {
+		return nil
+	}
+	if name == "" {
+		return fmt.Errorf("项目名称不能为空")
+	}
+	if name == ".." {
+		return fmt.Errorf("项目名称 %q 非法：不允许使用 %q", name, "..")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("项目名称 %q 非法：不能包含路径分隔符", name)
+	}
+	if strings.ContainsAny(name, " \t") {
+		return fmt.Errorf("项目名称 %q 非法：不能包含空白字符", name)
+	}
+	if strings.HasPrefix(name, "-") || strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
+		return fmt.Errorf("项目名称 %q 非法：不能以 -、_ 或 . 开头", name)
+	}
+	// 仅允许字母、数字、连字符、下划线，且至少一个字母/数字。
+	hasAlnum := false
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			hasAlnum = true
+		case r == '-' || r == '_':
+			// 允许的分隔符
+		default:
+			return fmt.Errorf("项目名称 %q 非法：只允许字母、数字、连字符(-)和下划线(_)", name)
+		}
+	}
+	if !hasAlnum {
+		return fmt.Errorf("项目名称 %q 非法：必须至少包含一个字母或数字", name)
+	}
+	return nil
 }
 
 // sanitizeModule 把任意名称规整为合法模块片段：小写、非字母数字转连字符。
