@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"runtime"
 )
 
 // 标准库转发，避免业务代码同时 import 两个 errors 包。
@@ -40,6 +41,10 @@ type Error struct {
 
 	// cause 是被包装的底层错误，不参与序列化。
 	cause error
+
+	// stack 是创建该错误时捕获的调用栈（runtime.Callers），无则为零值。
+	// 用于调试时定位错误源头；序列化给客户端时不包含。
+	stack []uintptr
 }
 
 // 确保实现标准接口。
@@ -58,6 +63,31 @@ func (e *Error) Error() string {
 // Unwrap 返回被包装的底层错误。
 func (e *Error) Unwrap() error { return e.cause }
 
+// Stack 返回错误创建时的调用栈，逐帧格式化为 "文件:行 函数"。
+// 若该错误未捕获栈（如仅反序列化而来），返回空切片。
+// 用法：
+//
+//	if e := errors.From(err); e != nil {
+//	    for _, line := range e.Stack() {
+//	        log.Println(line)
+//	    }
+//	}
+func (e *Error) Stack() []string {
+	if len(e.stack) == 0 {
+		return nil
+	}
+	frames := runtime.CallersFrames(e.stack)
+	lines := make([]string, 0, len(e.stack))
+	for {
+		frame, more := frames.Next()
+		lines = append(lines, fmt.Sprintf("%s:%d %s", frame.File, frame.Line, frame.Function))
+		if !more {
+			break
+		}
+	}
+	return lines
+}
+
 // Is 基于业务码比较，使 errors.Is 可用于同码不同实例的错误。
 func (e *Error) Is(target error) bool {
 	t, ok := target.(*Error)
@@ -71,16 +101,29 @@ func (e *Error) Is(target error) bool {
 /* 构造                                                                */
 /* ------------------------------------------------------------------ */
 
+// captureStack 捕获当前调用栈（跳过 captureStack 与直接调用者两层）。
+// 返回 runtime 栈帧 PC 切片；用于错误溯源。
+func captureStack() []uintptr {
+	const depth = 32
+	pcs := make([]uintptr, depth)
+	// skip=3: runtime.Callers, captureStack, NewError/Newf/From 调用点
+	n := runtime.Callers(3, pcs)
+	if n == 0 {
+		return nil
+	}
+	return pcs[:n]
+}
+
 // NewError 创建一个结构化错误。
 //
 //	var ErrUserNotFound = errors.NewError(404, "USER_NOT_FOUND", "用户不存在")
 func NewError(status int, code, message string) *Error {
-	return &Error{Status: status, Code: code, Message: message}
+	return &Error{Status: status, Code: code, Message: message, stack: captureStack()}
 }
 
 // Newf 创建一个消息带格式化的结构化错误。
 func Newf(status int, code, format string, args ...any) *Error {
-	return &Error{Status: status, Code: code, Message: fmt.Sprintf(format, args...)}
+	return &Error{Status: status, Code: code, Message: fmt.Sprintf(format, args...), stack: captureStack()}
 }
 
 /* ------------------------------------------------------------------ */
@@ -89,12 +132,14 @@ func Newf(status int, code, format string, args ...any) *Error {
 
 // clone 返回错误的浅拷贝。
 // 由于 Error 常被声明为包级变量，任何修改都必须在副本上进行。
+// 调用栈 stack 直接共享（不重新捕获），保留错误源头位置。
 func (e *Error) clone() *Error {
 	c := &Error{
 		Status:  e.Status,
 		Code:    e.Code,
 		Message: e.Message,
 		cause:   e.cause,
+		stack:   e.stack,
 	}
 	if len(e.Meta) > 0 {
 		c.Meta = make(map[string]any, len(e.Meta))
@@ -160,6 +205,7 @@ func From(err error) *Error {
 		Code:    CodeInternal,
 		Message: err.Error(),
 		cause:   err,
+		stack:   captureStack(),
 	}
 }
 

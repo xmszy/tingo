@@ -97,7 +97,7 @@ func (s *SecondSchedule) Next(now time.Time) time.Time {
 	t = t.Truncate(time.Second)
 
 	// 遍历查找（简化实现，高性能实现应用 calendar 算法）
-	for i := 0; i < 100*365*24*60*60; i++ {
+	for range 100*365*24*60*60 {
 		if s.matches(t) {
 			return t
 		}

@@ -59,6 +59,8 @@ func main() {
 		runCmd(args)
 	case "route:list":
 		routeListCmd(args)
+	case "migrate":
+		migrateCmd(args)
 	case "test":
 		testCmd(args)
 	case "clean":
@@ -86,6 +88,8 @@ func usage() {
   tingo run [--addr :8080] [--watch]   编译并运行（--watch 热重载）
   tingo serve [--addr :8080]           run 的别名
   tingo route:list [--method GET]      列出所有已注册路由
+  tingo migrate <up|down|reset|status> [--dir PATH] [--connection NAME] [--force]
+                                       执行/回滚/查看数据库迁移
   tingo test [go-test args...]         运行当前项目测试
   tingo clean                          清理构建产物
 

@@ -1,9 +1,13 @@
 package tdb
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
+
+	"github.com/xmszy/tingo/os/tevent"
 )
 
 type User struct {
@@ -56,7 +60,7 @@ func TestBuildInsertMapUsesStableColumnOrder(t *testing.T) {
 	db := openMem(t)
 	defer db.Close()
 	model := NewModel[User](db, "users")
-	sqlStr, args, columns, err := model.buildInsert(map[string]any{"name": "alice", "id": 7})
+	sqlStr, args, columns, err := model.buildInsert(map[string]any{"name": "alice", "id": 7}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,5 +351,264 @@ func TestSaveRoutesAndFiresAfterSave(t *testing.T) {
 	memMu.Unlock()
 	if updatedName != "alice2" {
 		t.Fatalf("Save->Update did not apply, name=%q", updatedName)
+	}
+}
+
+// ---- 查询作用域（scope）与模型事件测试 ----
+
+// OnlyAdult 是一个查询作用域：仅查询成年人。
+func onlyAdult(m *Model[User]) *Model[User] {
+	return m.Where("age >= ?", 18)
+}
+
+// OrderByAge 是一个查询作用域：按年龄升序。
+func orderByAge(m *Model[User]) *Model[User] {
+	return m.Order("age ASC")
+}
+
+// TestScopeAppliesAtExecution 验证 Scopes 在查询执行前按注册顺序应用。
+func TestScopeAppliesAtExecution(t *testing.T) {
+	db := openMem(t)
+	defer db.Close()
+	seedTable("test", "user",
+		map[string]any{"id": 1, "name": "alice", "age": 30, "email": "a@x.com"},
+		map[string]any{"id": 2, "name": "kid", "age": 10, "email": "k@x.com"},
+		map[string]any{"id": 3, "name": "bob", "age": 25, "email": "b@x.com"},
+	)
+	// 应用作用域后，scope 条件与额外条件叠加，且作用域内部 Order 生效。
+	m := NewModel[User](db).Scopes(onlyAdult, orderByAge)
+	// 验证 scope 已正确编译进 SQL（过滤条件与排序）。
+	applied := m.applyScopes()
+	sqlStr, _ := applied.buildSelect()
+	want := "SELECT * FROM `user` WHERE age >= ? ORDER BY age ASC"
+	if sqlStr != want {
+		t.Fatalf("scope compiled SQL:\n got=%q\nwant=%q", sqlStr, want)
+	}
+	all, err := m.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 注意：memdriver 测试驱动仅解析 LIMIT/OFFSET，不对内存结果排序，
+	// 故此处仅断言过滤（age>=18）生效，排序由 SQL 编译断言保证。
+	if len(all) != 2 {
+		t.Fatalf("scope should filter out age<18, got %d rows: %+v", len(all), all)
+	}
+}
+
+// TestScopeAppliedOnce 验证作用域只应用一次（多次查询不重复叠加）。
+func TestScopeAppliedOnce(t *testing.T) {
+	db := openMem(t)
+	defer db.Close()
+	seedTable("test", "user",
+		map[string]any{"id": 1, "name": "alice", "age": 30, "email": "a@x.com"},
+		map[string]any{"id": 2, "name": "kid", "age": 10, "email": "k@x.com"},
+	)
+	m := NewModel[User](db).Scope(onlyAdult)
+	_ = m // 复用同一 model 多次查询
+	first, err := m.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("scope should apply exactly once per query, got %d/%d", len(first), len(second))
+	}
+}
+
+// scopeProbe 用于观测模型事件触发。
+type scopeProbe struct {
+	Id    int    `tdb:"id"`
+	Name  string `tdb:"name"`
+	Age   int    `tdb:"age"`
+	Email string `tdb:"email"`
+}
+
+func (scopeProbe) TableName() string { return "user" }
+
+// TestModelEventFires 验证 Insert/Update/Delete 触发对应的前后模型事件。
+func TestModelEventFires(t *testing.T) {
+	db := openMem(t)
+	defer db.Close()
+	bus := tevent.NewBus(true)
+	db.EnableEvents(bus)
+
+	var mu sync.Mutex
+	var fired []string
+	m := NewModel[scopeProbe](db, "user")
+	m.OnBeforeInsert(func(ctx context.Context, d ModelEventData) error {
+		mu.Lock()
+		fired = append(fired, "before_insert")
+		mu.Unlock()
+		return nil
+	})
+	m.OnAfterInsert(func(ctx context.Context, d ModelEventData) error {
+		mu.Lock()
+		fired = append(fired, "after_insert")
+		mu.Unlock()
+		if _, ok := d.Model.(scopeProbe); !ok {
+			t.Errorf("after_insert model type wrong: %T", d.Model)
+		}
+		return nil
+	})
+
+	// 触发 Insert 事件（before_insert / after_insert）。
+	if _, err := m.Insert(scopeProbe{Id: 1, Name: "alice", Age: 30, Email: "a@x.com"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 注册 update/delete 监听，并对已存在记录执行更新/删除。
+	m.OnBeforeUpdate(func(ctx context.Context, d ModelEventData) error {
+		mu.Lock()
+		fired = append(fired, "before_update")
+		mu.Unlock()
+		return nil
+	})
+	m.OnBeforeDelete(func(ctx context.Context, d ModelEventData) error {
+		mu.Lock()
+		fired = append(fired, "before_delete")
+		mu.Unlock()
+		return nil
+	})
+	m.OnAfterDelete(func(ctx context.Context, d ModelEventData) error {
+		mu.Lock()
+		fired = append(fired, "after_delete")
+		mu.Unlock()
+		return nil
+	})
+
+	if _, err := m.WhereEQ("id", 1).Update(map[string]any{"age": 31}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.WhereEQ("id", 1).Delete(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"before_insert", "after_insert", "before_update", "before_delete", "after_delete"}
+	mu.Lock()
+	got := append([]string(nil), fired...)
+	mu.Unlock()
+	if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+		t.Fatalf("model events fired = %v, want %v", got, want)
+	}
+}
+
+// TestModelEventCanAbort 验证 Before 事件返回错误可中断写操作。
+func TestModelEventCanAbort(t *testing.T) {
+	db := openMem(t)
+	defer db.Close()
+	bus := tevent.NewBus(true)
+	db.EnableEvents(bus)
+
+	m := NewModel[scopeProbe](db, "user")
+	m.OnBeforeInsert(func(ctx context.Context, d ModelEventData) error {
+		return errors.New("aborted by listener")
+	})
+	if _, err := m.Insert(scopeProbe{Name: "x"}); err == nil {
+		t.Fatal("expected before_insert error to abort insert")
+	}
+}
+
+// TestFindOrFail 验证查不到时返回 ErrNoRows。
+func TestFindOrFail(t *testing.T) {
+	db := openMem(t)
+	defer db.Close()
+	m := NewModel[User](db)
+	if _, err := m.FindOrFail(); !errors.Is(err, ErrNoRows) {
+		t.Fatalf("FindOrFail empty want ErrNoRows, got %v", err)
+	}
+	seedTable("test", "user",
+		map[string]any{"id": 1, "name": "alice", "age": 30, "email": "a@x.com"},
+	)
+	u, err := m.WhereEQ("id", 1).FindOrFail()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Name != "alice" {
+		t.Fatalf("FindOrFail name = %q", u.Name)
+	}
+}
+
+// TestFirstOrCreate 验证命中返回且不重复插入。
+//
+// 注：memdriver 的 INSERT 走事务连接、与查询连接按连接名隔离，
+// 不保证写后即可在同连接读到（真实数据库无此限制）。因此本测试仅验证
+// 「命中现有记录」路径：不重复插入、返回已存在行。插入路径（写后读）由
+// 真实数据库集成测试覆盖。
+func TestFirstOrCreate(t *testing.T) {
+	db := openMem(t)
+	defer db.Close()
+	m := NewModel[User](db)
+
+	// 预置一条 name=carol 的记录，FirstOrCreate 应命中而不重复插入。
+	seedTable("test", "user",
+		map[string]any{"id": 1, "name": "carol", "age": 18, "email": "c@x"},
+	)
+	got, err := m.FirstOrCreate(func(q *Model[User]) *Model[User] {
+		return q.WhereEQ("name", "carol")
+	}, User{Name: "carol", Age: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "carol" || got.Age != 18 {
+		t.Fatalf("FirstOrCreate should return existing row, got %+v", got)
+	}
+	if all, _ := m.All(); len(all) != 1 {
+		t.Fatalf("FirstOrCreate should not duplicate existing, rows=%d", len(all))
+	}
+
+	// 不存在条件：FirstOrCreate 应进入插入分支且不 panic（memdriver 不持久化，
+	// 此处仅验证调用路径可达，真实 DB 下会写入并返回新行）。
+	if _, err := m.FirstOrCreate(func(q *Model[User]) *Model[User] {
+		return q.WhereEQ("name", "dave")
+	}, User{Name: "dave", Age: 21}); err != nil {
+		t.Fatalf("FirstOrCreate insert branch should not error: %v", err)
+	}
+}
+
+// TestChunkById 验证按主键游标分批遍历。
+// 注：memdriver 支持 WHERE/LIMIT/ORDER BY 解析，可验证分批逻辑；
+// 分批的去重完整性依赖主键游标推进，size=1 时每批 1 行。
+func TestChunkById(t *testing.T) {
+	db := openMem(t)
+	defer db.Close()
+	m := NewModel[User](db)
+	seedTable("test", "user",
+		map[string]any{"id": 1, "name": "a", "age": 1, "email": "a@x"},
+		map[string]any{"id": 2, "name": "b", "age": 2, "email": "b@x"},
+		map[string]any{"id": 3, "name": "c", "age": 3, "email": "c@x"},
+		map[string]any{"id": 4, "name": "d", "age": 4, "email": "d@x"},
+	)
+	// size=1：每批 1 行，应分 4 批，游标按主键推进。
+	var total int
+	batches := 0
+	err := m.ChunkById(1, func(items []User) (bool, error) {
+		t.Logf("batch %d: %+v", batches+1, items)
+		batches++
+		total += len(items)
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 || batches != 4 {
+		t.Fatalf("ChunkById(size=1) total=%d batches=%d, want 4/4", total, batches)
+	}
+
+	// size=4：一次取完，1 批。
+	total = 0
+	batches = 0
+	err = m.ChunkById(4, func(items []User) (bool, error) {
+		batches++
+		total += len(items)
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 || batches != 1 {
+		t.Fatalf("ChunkById(size=4) total=%d batches=%d, want 4/1", total, batches)
 	}
 }

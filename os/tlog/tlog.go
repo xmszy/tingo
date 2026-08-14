@@ -69,6 +69,14 @@ type Config struct {
 	TimeFormat string
 	// Prefix 每行前缀标签。
 	Prefix string
+	// File 指定日志文件路径。非空时自动启用基于文件大小的轮转写入器
+	// （通过 RotatingWriter，配合 RotateMaxSize/RotateMaxBackups）。
+	// 设置 File 后，Writer 字段被忽略。
+	File string
+	// RotateMaxSize 是单日志文件大小上限（字节），<=0 表示 100MB。
+	RotateMaxSize int64
+	// RotateMaxBackups 是保留的备份文件数，<=0 表示不限制。
+	RotateMaxBackups int
 }
 
 // Flag 控制附加输出信息位。
@@ -99,6 +107,19 @@ func DefaultConfig() Config {
 	}
 }
 
+// Hook 是日志钩子，每条日志写出前会依次回调（同步、不阻塞主写入路径太久）。
+// 可用于转发到外部系统（如 Kafka、ES）、附加公共字段、按级别告警等。
+type Hook interface {
+	// OnLog 在日志格式化写出后调用。返回的错误会被忽略（避免影响主流程）。
+	OnLog(e entry) error
+}
+
+// HookFunc 是把函数适配为 Hook 的便捷类型。
+type HookFunc func(e entry) error
+
+// OnLog 实现 Hook 接口。
+func (f HookFunc) OnLog(e entry) error { return f(e) }
+
 // Logger 是日志实例。可克隆派生（链式配置），派生实例共享底层 writer。
 type Logger struct {
 	cfg    Config
@@ -107,6 +128,9 @@ type Logger struct {
 	ch     chan entry // 异步 channel
 	done   chan struct{}
 	closed bool
+	hooks  []Hook
+	hmu    sync.RWMutex // 保护 hooks 读写
+	rotateCloser io.Closer // 文件轮转写入器（若有），Close 时一并关闭
 }
 
 type entry struct {
@@ -140,19 +164,42 @@ func NewWithConfig(c Config) *Logger {
 	if l.cfg.TimeFormat == "" {
 		l.cfg.TimeFormat = defaultTimeFormat
 	}
+	// 配置了 File 时，自动启用基于文件大小的轮转写入器（忽略 Writer 字段）。
+	if l.cfg.File != "" {
+		rw, err := NewRotatingWriter(l.cfg.File, l.cfg.RotateMaxSize, l.cfg.RotateMaxBackups)
+		if err != nil {
+			// 打开失败不应让进程崩溃：降级为 stderr 并附带提示。
+			fmt.Fprintf(os.Stderr, "tlog: open rotate file %q failed: %v, fallback to stderr\n", l.cfg.File, err)
+		} else {
+			l.cfg.Writer = rw
+			l.rotateCloser = rw
+		}
+	}
 	if l.cfg.Async {
 		l.startAsync()
 	}
 	return l
 }
 
-// Clone 浅拷贝配置，用于派生带不同级别/前缀的子 logger。
+// Clone 浅拷贝配置，用于派生带不同级别/前缀的子 logger。继承钩子列表。
 func (l *Logger) Clone() *Logger {
-	n := &Logger{cfg: l.cfg}
+	n := &Logger{cfg: l.cfg, hooks: l.snapshotHooks()}
 	if l.cfg.Async {
 		n.startAsync()
 	}
 	return n
+}
+
+// snapshotHooks 返回当前钩子列表的快照（读锁保护）。
+func (l *Logger) snapshotHooks() []Hook {
+	l.hmu.RLock()
+	defer l.hmu.RUnlock()
+	if len(l.hooks) == 0 {
+		return nil
+	}
+	h := make([]Hook, len(l.hooks))
+	copy(h, l.hooks)
+	return h
 }
 
 // SetLevel 设置最低输出级别（链式）。
@@ -187,6 +234,15 @@ func (l *Logger) SetFlags(f Flag) *Logger {
 	return l
 }
 
+// AddHook 注册一个日志钩子。钩子在每条日志格式化写出后同步回调。
+// 派生（Clone/With）的 logger 会继承父级的钩子列表。
+func (l *Logger) AddHook(h Hook) *Logger {
+	l.hmu.Lock()
+	l.hooks = append(l.hooks, h)
+	l.hmu.Unlock()
+	return l
+}
+
 func (l *Logger) startAsync() {
 	buf := l.cfg.AsyncBuffer
 	if buf <= 0 {
@@ -204,7 +260,7 @@ func (l *Logger) consume() {
 	close(l.done)
 }
 
-// Close 关闭 logger，刷新异步缓冲。
+// Close 关闭 logger，刷新异步缓冲并关闭底层轮转写入器。
 func (l *Logger) Close() error {
 	l.mu.Lock()
 	if l.closed {
@@ -215,11 +271,15 @@ func (l *Logger) Close() error {
 		close(l.ch)
 		l.mu.Unlock()
 		<-l.done // 等待消费 goroutine 退出（其写入使用独立 wmu，不会与此处死锁）
-		return nil
+	} else {
+		l.closed = true
+		l.mu.Unlock()
 	}
-	l.closed = true
-	l.mu.Unlock()
-	return nil
+	var result error
+	if l.rotateCloser != nil {
+		result = l.rotateCloser.Close()
+	}
+	return result
 }
 
 // log 是核心写入路径。
@@ -296,6 +356,13 @@ func (l *Logger) write(e entry) {
 	l.wmu.Lock()
 	_, _ = io.WriteString(l.cfg.Writer, b.String())
 	l.wmu.Unlock()
+
+	// 钩子：同步回调（忽略错误，避免影响主流程）。
+	if hs := l.snapshotHooks(); len(hs) > 0 {
+		for _, h := range hs {
+			_ = h.OnLog(e)
+		}
+	}
 }
 
 // Debug / Info / Warn / Error / Fatal —— 接收任意数量参数。
@@ -328,9 +395,9 @@ func (l *Logger) Fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
-// With 结构化字段日志。
+// With 结构化字段日志。继承钩子列表。
 func (l *Logger) With(fields ...Field) *Logger {
-	return &Logger{cfg: l.cfg, ch: l.ch, done: l.done}
+	return &Logger{cfg: l.cfg, ch: l.ch, done: l.done, hooks: l.snapshotHooks()}
 }
 
 // Debugw / Infow / Warnw / Errorw —— 带结构化字段。

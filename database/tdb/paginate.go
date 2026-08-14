@@ -21,6 +21,8 @@ type PaginateResult[T any] struct {
 //	result, err := db.Model[User]().Where("status", 1).Order("id desc").Paginate(1, 20)
 //	for _, user := range result.Items { ... }
 func (m *Model[T]) Paginate(page, perPage int) (*PaginateResult[T], error) {
+	m = m.applyScopes()
+
 	if page < 1 {
 		page = 1
 	}
@@ -59,6 +61,8 @@ func (m *Model[T]) Paginate(page, perPage int) (*PaginateResult[T], error) {
 
 // SimplePaginate 简单分页（不查总数，仅判断是否有下一页）。
 func (m *Model[T]) SimplePaginate(page, perPage int) (*PaginateResult[T], error) {
+	m = m.applyScopes()
+
 	if page < 1 {
 		page = 1
 	}

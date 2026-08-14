@@ -46,7 +46,7 @@ func makeCmd(args []string) {
 	}
 	kind := args[0]
 
-	// 解析 @app 内联语法（对标 TP：controller index@User 表示 index 应用下的 User 控制器）。
+	// 解析 @app 内联语法（controller index@User 表示 index 应用下的 User 控制器）。
 	// @ 优先于 --app 标志。
 	rawName := args[1]
 	appInline := ""
@@ -337,7 +337,7 @@ func stubData(name, app, module string) map[string]interface{} {
 
 // makeApp 生成一个新的子应用骨架（app/<name>/），并维护聚合导入文件。
 //
-// 对标 TP 多应用目录，但 Go 是编译型语言，无法运行时扫描目录自动注册，
+// 多应用目录骨架生成。Go 是编译型语言，无法运行时扫描目录自动注册，
 // 因此每个子应用包需在 app/applications.go 中匿名导入以触发其 init() 注册。
 func makeApp(name string, force bool) {
 	module, err := modulePathOf(".")

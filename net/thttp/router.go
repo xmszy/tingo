@@ -8,6 +8,7 @@ package thttp
 import (
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -100,6 +101,42 @@ func (r *router) Use(mws ...core.Handler) core.Router {
 	return r
 }
 
+// PrioritizedMiddleware 是带优先级中间件（别名 core.WeightedMiddleware）。
+//
+// 数值越小越先执行（全局 -> 模块 -> 控制器 -> 动作 由小到大注册）。
+// 同级按注册顺序。
+type PrioritizedMiddleware = core.WeightedMiddleware
+
+// UseOrdered 按优先级追加中间件到当前组。
+//
+// 在注册期对传入的中间件按 Priority 升序排序后，再 flatten 进 gin 的 HandlersChain，
+// 使调用顺序与优先级一致，无需依赖调用次序。
+//
+// 用法：
+//
+//	r.UseOrdered(
+//	    thttp.PrioritizedMiddleware{Recover(), 0},
+//	    thttp.PrioritizedMiddleware{Auth(), 100},
+//	    thttp.PrioritizedMiddleware{Log(), 50},
+//	)
+//	// 执行顺序：Recover(0) -> Log(50) -> Auth(100)
+func (r *router) UseOrdered(mws ...core.WeightedMiddleware) core.Router {
+	if len(mws) == 0 {
+		return r
+	}
+	sorted := make([]core.WeightedMiddleware, len(mws))
+	copy(sorted, mws)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Priority < sorted[j].Priority
+	})
+	hs := make([]core.Handler, len(sorted))
+	for i, mw := range sorted {
+		hs[i] = mw.H
+	}
+	r.group.Use(core.GinChain(hs)...)
+	return r
+}
+
 // Group 创建子路由组。
 func (r *router) Group(prefix string, fn func(core.Router), mws ...core.Handler) core.Router {
 	g := r.group.Group(prefix, core.GinChain(mws)...)
@@ -113,6 +150,18 @@ func (r *router) Group(prefix string, fn func(core.Router), mws ...core.Handler)
 		fn(sub)
 	}
 	return r
+}
+
+// Module 创建按模块名隔离的子路由组。
+//
+// 自动套 /{module} 前缀并隔离中间件组：模块级中间件仅作用于该模块内路由，
+// 不影响模块外；模块内再 Group 基于 /{module} 前缀展开。
+//
+// 例：Module("admin", func(r) { r.GET("/user", listUser) })
+// 最终注册路由：GET /admin/user
+func (r *router) Module(name string, fn func(core.Router), mws ...core.Handler) core.Router {
+	prefix := "/" + strings.Trim(name, "/")
+	return r.Group(prefix, fn, mws...)
 }
 
 // Static 注册静态文件目录。

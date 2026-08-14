@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -73,25 +74,83 @@ func mapToStruct(input any, output any, opts ScanOption) error {
 	return fmt.Errorf("tconv: unsupported input type %T", input)
 }
 
-func mapToStructFromMap(mv reflect.Value, ov reflect.Value, ot reflect.Type, opts ScanOption) error {
-	tagName := opts.TagName
+// fieldMapEntry 是缓存解析后的「目标字段 → map key」映射，避免每次反射遍历 + 解析 tag。
+type fieldMapEntry struct {
+	index int
+	key   reflect.Value // reflect.ValueOf(name)，直接用于 mv.MapIndex
+}
 
-	var errs []string
+// structCacheKey 缓存键：目标结构体类型 + 使用的 tag 名。
+type structCacheKey struct {
+	typ     reflect.Type
+	tagName string
+}
+
+// structFieldCache 按 (reflect.Type, tagName) 缓存字段映射（并发安全，只读不删）。
+var structFieldCache sync.Map
+
+// cachedMapFields 返回目标结构体按 tag 解析出的字段映射，第二次起直接命中缓存。
+// 映射不依赖 opts（仅取字段名），可安全复用。
+func cachedMapFields(ot reflect.Type, tagName string) []fieldMapEntry {
+	key := structCacheKey{ot, tagName}
+	if v, ok := structFieldCache.Load(key); ok {
+		return v.([]fieldMapEntry)
+	}
+	var entries []fieldMapEntry
 	for i := 0; i < ot.NumField(); i++ {
 		sf := ot.Field(i)
 		if !sf.IsExported() {
 			continue
 		}
-
-		// 获取字段名（tag 优先）
 		fieldName := fieldNameByTag(sf, tagName)
 		if fieldName == "" || fieldName == "-" {
 			continue
 		}
+		entries = append(entries, fieldMapEntry{index: i, key: reflect.ValueOf(fieldName)})
+	}
+	structFieldCache.Store(key, entries)
+	return entries
+}
 
-		// 从 map 取值
-		mk := reflect.ValueOf(fieldName)
-		val := mv.MapIndex(mk)
+// cachedStructByName 缓存「目标结构体按 name 检索的字段索引」，供 structToStruct 复用。
+// 优先级：tag 名 > 原始字段名 > 小写字段名（命中第一个即可）。
+var structByNameCache sync.Map
+
+func cachedStructByName(ot reflect.Type, tagName string) map[string]int {
+	key := structCacheKey{ot, tagName}
+	if v, ok := structByNameCache.Load(key); ok {
+		return v.(map[string]int)
+	}
+	idx := make(map[string]int)
+	for i := 0; i < ot.NumField(); i++ {
+		sf := ot.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		if name := fieldNameByTag(sf, tagName); name != "" && name != "-" {
+			if _, exists := idx[name]; !exists {
+				idx[name] = i
+			}
+		}
+		if _, exists := idx[sf.Name]; !exists {
+			idx[sf.Name] = i
+		}
+		if lo := strings.ToLower(sf.Name); lo != "" {
+			if _, exists := idx[lo]; !exists {
+				idx[lo] = i
+			}
+		}
+	}
+	structByNameCache.Store(key, idx)
+	return idx
+}
+
+func mapToStructFromMap(mv reflect.Value, ov reflect.Value, ot reflect.Type, opts ScanOption) error {
+	entries := cachedMapFields(ot, opts.TagName)
+
+	var errs []string
+	for _, e := range entries {
+		val := mv.MapIndex(e.key)
 		if !val.IsValid() {
 			continue
 		}
@@ -100,17 +159,18 @@ func mapToStructFromMap(mv reflect.Value, ov reflect.Value, ot reflect.Type, opt
 			continue
 		}
 
-		fv := ov.Field(i)
+		fv := ov.Field(e.index)
 		if !fv.CanSet() {
 			continue
 		}
 
-		if err := setField(fv, val.Interface()); err != nil {
+		if err := setFieldValue(fv, val); err != nil {
 			if opts.ContinueOnError {
+				sf := ot.Field(e.index)
 				errs = append(errs, fmt.Sprintf("%s: %v", sf.Name, err))
 				continue
 			}
-			return fmt.Errorf("tconv: field %s: %w", sf.Name, err)
+			return fmt.Errorf("tconv: field %s: %w", ot.Field(e.index).Name, err)
 		}
 	}
 
@@ -123,59 +183,34 @@ func mapToStructFromMap(mv reflect.Value, ov reflect.Value, ot reflect.Type, opt
 func structToStruct(sv reflect.Value, ov reflect.Value, ot reflect.Type, opts ScanOption) error {
 	tagName := opts.TagName
 	st := sv.Type()
-	svFields := make(map[string]reflect.Value)
-
-	for i := 0; i < st.NumField(); i++ {
-		f := st.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		key := fieldNameByTag(f, tagName)
-		if key == "" {
-			key = f.Name
-		}
-		svFields[key] = sv.Field(i)
-		svFields[strings.ToLower(f.Name)] = sv.Field(i)
-	}
+	// 源字段名→索引也走缓存，避免每次反射遍历源结构体（与目标字段缓存对称）。
+	srcByName := cachedStructByName(st, tagName)
+	dstByName := cachedStructByName(ot, tagName)
 
 	var errs []string
-	for i := 0; i < ot.NumField(); i++ {
-		sf := ot.Field(i)
-		if !sf.IsExported() {
-			continue
-		}
-
-		fieldName := fieldNameByTag(sf, tagName)
-		if fieldName == "" || fieldName == "-" {
-			continue
-		}
-
-		svField, ok := svFields[fieldName]
-		if !ok {
-			svField, ok = svFields[sf.Name]
-		}
-		if !ok {
-			svField, ok = svFields[strings.ToLower(sf.Name)]
-		}
+	for name, di := range dstByName {
+		si, ok := srcByName[name]
 		if !ok {
 			continue
 		}
+		svField := sv.Field(si)
 
 		if opts.OmitEmpty && svField.IsZero() {
 			continue
 		}
 
-		fv := ov.Field(i)
+		fv := ov.Field(di)
 		if !fv.CanSet() {
 			continue
 		}
 
-		if err := setField(fv, svField.Interface()); err != nil {
+		if err := setFieldValue(fv, svField); err != nil {
 			if opts.ContinueOnError {
+				sf := ot.Field(di)
 				errs = append(errs, fmt.Sprintf("%s: %v", sf.Name, err))
 				continue
 			}
-			return fmt.Errorf("tconv: field %s: %w", sf.Name, err)
+			return fmt.Errorf("tconv: field %s: %w", ot.Field(di).Name, err)
 		}
 	}
 
@@ -198,13 +233,17 @@ func fieldNameByTag(sf reflect.StructField, tagName string) string {
 	return tag
 }
 
-// setField 将 value 写入目标 reflect.Value，自动类型转换。
-func setField(fv reflect.Value, val any) error {
-	if val == nil {
+// setFieldValue 直接基于 reflect.Value 赋值，避免调用方先 .Interface() 再 reflect.ValueOf 的来回装箱。
+// 这是热路径（ORM 扫描 / 参数绑定）的核心优化点，与 GoFrame 直接反射操作的思路一致。
+func setFieldValue(fv reflect.Value, vv reflect.Value) error {
+	if !vv.IsValid() {
+		return nil
+	}
+	// 处理 map 中的 nil interface 零值
+	if vv.Kind() == reflect.Interface && vv.IsNil() {
 		return nil
 	}
 
-	vv := reflect.ValueOf(val)
 	ft := fv.Type()
 	vt := vv.Type()
 
@@ -223,35 +262,35 @@ func setField(fv reflect.Value, val any) error {
 	// 特殊类型处理
 	switch fv.Kind() {
 	case reflect.String:
-		fv.SetString(String(val))
+		fv.SetString(String(vv.Interface()))
 		return nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		fv.SetInt(Int64(val))
+		fv.SetInt(Int64(vv.Interface()))
 		return nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		fv.SetUint(Uint64(val))
+		fv.SetUint(Uint64(vv.Interface()))
 		return nil
 	case reflect.Float32, reflect.Float64:
-		fv.SetFloat(Float64(val))
+		fv.SetFloat(Float64(vv.Interface()))
 		return nil
 	case reflect.Bool:
-		fv.SetBool(Bool(val))
+		fv.SetBool(Bool(vv.Interface()))
 		return nil
 	case reflect.Slice:
 		if ft.Elem().Kind() == reflect.Uint8 { // []byte
-			fv.SetBytes(Bytes(val))
+			fv.SetBytes(Bytes(vv.Interface()))
 			return nil
 		}
 		return setSlice(fv, vv)
 	case reflect.Struct:
 		if ft == reflect.TypeOf(time.Time{}) {
-			fv.Set(reflect.ValueOf(Time(val)))
+			fv.Set(reflect.ValueOf(Time(vv.Interface())))
 			return nil
 		}
 		// 尝试递归 MapToStruct
 		if vv.Kind() == reflect.Map || (vv.Kind() == reflect.Ptr && vv.Elem().Kind() == reflect.Struct) {
 			nv := reflect.New(ft)
-			if err := mapToStruct(val, nv.Interface(), ScanOption{}); err != nil {
+			if err := mapToStruct(vv.Interface(), nv.Interface(), ScanOption{}); err != nil {
 				return err
 			}
 			fv.Set(nv.Elem())
@@ -259,7 +298,7 @@ func setField(fv reflect.Value, val any) error {
 		}
 	}
 
-	return fmt.Errorf("cannot convert %T to %s", val, ft)
+	return fmt.Errorf("cannot convert %s to %s", vt, ft)
 }
 
 func setSlice(fv reflect.Value, vv reflect.Value) error {

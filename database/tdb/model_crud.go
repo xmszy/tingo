@@ -1,12 +1,12 @@
 package tdb
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 )
 
 // runQuery 在 DB 或 Tx 上执行查询。
@@ -90,7 +90,7 @@ func (m *Model[T]) appendJoins(b *strings.Builder) []any {
 func (m *Model[T]) appendWheres(b *strings.Builder, args []any) []any {
 	// 软删除过滤
 	var zero T
-	sdCol, hasSD := hasSoftDelete(&zero)
+	sdCol, _, hasSD := hasSoftDelete(&zero)
 
 	var sdExpr string
 	if hasSD && !m.withTrashed && !m.onlyTrashed {
@@ -155,14 +155,20 @@ func (m *Model[T]) appendOrders(b *strings.Builder) {
 
 // All 查询多行，返回 []T。
 func (m *Model[T]) All() ([]T, error) {
+	m = m.applyScopes()
+
+	zero := newZero[T]()
 	// BeforeQuery hook
 	if !m.disableHooks {
-		hook := newZero[T]()
-		if s, ok := hook.(BeforeQuerier); ok {
+		if s, ok := zero.(BeforeQuerier); ok {
 			if err := s.BeforeQuery(); err != nil {
 				return nil, err
 			}
 		}
+	}
+	// BeforeQuery 模型事件。
+	if err := m.fireModelEvent(m.ctx, EventBeforeQuery, zero, nil); err != nil {
+		return nil, err
 	}
 
 	sqlStr, args := m.buildSelect()
@@ -185,6 +191,10 @@ func (m *Model[T]) All() ([]T, error) {
 			}
 		}
 	}
+	// AfterQuery 模型事件（每行一个）。
+	if err := m.fireModelEvent(m.ctx, EventAfterQuery, &result, nil); err != nil {
+		return result, err
+	}
 
 	// 预加载关联
 	if len(m.preloads) > 0 {
@@ -197,10 +207,14 @@ func (m *Model[T]) All() ([]T, error) {
 }
 
 // loadPreloads 执行所有关联预加载（支持嵌套，如 "Profile.Photos"）。
+// 使用 m.ctx 透传超时/取消（避免预加载查询不受控）。
 func (m *Model[T]) loadPreloads(items *[]T) error {
 	db := m.sourceDB()
 	if db == nil {
 		return nil
+	}
+	if m.ctx != nil {
+		db = db.Ctx(m.ctx)
 	}
 
 	// 分两层处理：先加载根级（无 "."），再加载嵌套（含 "."）。
@@ -212,7 +226,7 @@ func (m *Model[T]) loadPreloads(items *[]T) error {
 		if strings.Contains(p.name, ".") {
 			continue
 		}
-		if err := p.preloader.load(context.Background(), db, items, p.name); err != nil {
+		if err := p.preloader.load(m.ctx, db, items, p.name); err != nil {
 			return err
 		}
 	}
@@ -236,7 +250,7 @@ func (m *Model[T]) loadPreloads(items *[]T) error {
 			continue
 		}
 
-		if err := p.preloader.load(context.Background(), db, subItems, subName); err != nil {
+		if err := p.preloader.load(m.ctx, db, subItems, subName); err != nil {
 			return err
 		}
 	}
@@ -254,14 +268,20 @@ func (m *Model[T]) sourceDB() *DB {
 
 // One 查询单行，写入 dst。无行返回 ErrNoRows。
 func (m *Model[T]) One(dst *T) error {
+	m = m.applyScopes()
+
+	zero := newZero[T]()
 	// BeforeQuery hook
 	if !m.disableHooks {
-		hook := newZero[T]()
-		if s, ok := hook.(BeforeQuerier); ok {
+		if s, ok := zero.(BeforeQuerier); ok {
 			if err := s.BeforeQuery(); err != nil {
 				return err
 			}
 		}
+	}
+	// BeforeQuery 模型事件。
+	if err := m.fireModelEvent(m.ctx, EventBeforeQuery, zero, nil); err != nil {
+		return err
 	}
 
 	sqlStr, args := m.buildSelect()
@@ -288,6 +308,10 @@ func (m *Model[T]) One(dst *T) error {
 				return err
 			}
 		}
+	}
+	// AfterQuery 模型事件。
+	if err := m.fireModelEvent(m.ctx, EventAfterQuery, dst, nil); err != nil {
+		return err
 	}
 	return nil
 }
@@ -337,6 +361,123 @@ func (m *Model[T]) Exists() (bool, error) {
 	return n > 0, err
 }
 
+// FindOrFail 查询单行，无结果时返回 ErrNoRows（便于上层决定 404）。
+// 与 Find 的区别：Find 对「无行」静默返回零值，FindOrFail 显式报错。
+func (m *Model[T]) FindOrFail() (T, error) {
+	var dst T
+	if err := m.One(&dst); err != nil {
+		return dst, err
+	}
+	return dst, nil
+}
+
+// FirstOrCreate 查询首行；不存在时以 merge 合并默认值后插入并返回。
+//
+//	m.User().FirstOrCreate(
+//	    tdb.WhereEQ("openid", openid),
+//	    User{Name: "guest", Status: 1},
+//	)
+//
+// cond 是作用于查询的条件（任意返回 *Model[T] 的链式调用）；
+// defaults 是插入时的缺省值（struct 或 map）。命中时返回已存在记录。
+func (m *Model[T]) FirstOrCreate(cond func(*Model[T]) *Model[T], defaults any) (T, error) {
+	var zero T
+	q := m
+	if cond != nil {
+		q = cond(m)
+	}
+	got, err := q.Find()
+	if err == nil && !isZeroModel(got) {
+		return got, nil
+	}
+	if _, err := m.Insert(mergeDefaults(q, defaults)); err != nil {
+		return zero, err
+	}
+	// 重新查询命中记录（Insert 不回填完整字段，且并发下更稳）。
+	return q.Find()
+}
+
+// mergeDefaults 在 defaults 之上叠加查询条件中的等值字段，
+// 保证插入行满足后续查询条件（典型如唯一键）。
+func mergeDefaults[T any](q *Model[T], defaults any) any {
+	// 若 defaults 已是带条件的 struct/map，直接返回即可；
+	// 仅当 defaults 缺主键外的等值条件时，复制 where 中的等值字段。
+	if len(q.wheres) == 0 {
+		return defaults
+	}
+	rv := reflect.ValueOf(defaults)
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return defaults
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return defaults
+	}
+	out := reflect.New(rv.Type()).Elem()
+	out.Set(rv)
+	for _, w := range q.wheres {
+		// 仅支持 `col = ?` 形式的简单等值条件复制。
+		if eq := strings.Index(w.expr, " = ?"); eq > 0 && len(w.args) == 1 {
+			col := strings.TrimSpace(w.expr[:eq])
+			col = strings.Trim(col, "`\"")
+			if f := out.FieldByNameFunc(func(name string) bool {
+				return strings.EqualFold(name, col)
+			}); f.IsValid() && f.CanSet() && isZero(f) {
+				f.Set(reflect.ValueOf(w.args[0]).Convert(f.Type()))
+			}
+		}
+	}
+	return out.Interface()
+}
+
+// isZeroModel 判断 T 是否为零值（用于 FirstOrCreate 命中判定）。
+func isZeroModel(v any) bool {
+	rv := reflect.ValueOf(v)
+	return isZero(rv)
+}
+
+// ChunkById 基于主键游标分批处理全表。
+//
+// 适用于大数据集遍历：每次取 size 行，按主键升序推进游标，避免一次性加载内存。
+// 回调返回 error 立即终止；返回 false 也终止遍历。主键由 tdb tag 的 primaryKey
+// 标识，缺失时回退到名为 id 的字段（与 Save 主键解析规则一致）。
+func (m *Model[T]) ChunkById(size int, fn func(items []T) (bool, error)) error {
+	if size <= 0 {
+		size = 100
+	}
+	col, _, ok := primaryKeyOf(newZero[T]())
+	if !ok {
+		col = "id"
+	}
+	var last any
+	for {
+		// 每轮基于 m 克隆独立构造查询：避免 unsafe 模式下 Order/Limit 持续累积到
+		// 同一 Model 导致 SQL 退化（Clone 出的新 Model 为 unsafe，可原地修改）。
+		q := m.Clone().Order(col + " ASC").Limit(size)
+		if last != nil {
+			q = q.Where(col+" > ?", last)
+		}
+		items, err := q.All()
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			return nil
+		}
+		cont, err := fn(items)
+		if err != nil {
+			return err
+		}
+		// 记录本批最后一行的主键值作为下一轮游标。
+		_, last, _ = primaryKeyOf(items[len(items)-1])
+		if !cont || len(items) < size {
+			return nil
+		}
+	}
+}
+
 // rowToScalar 扫描单行单列标量（如 COUNT）。
 func rowToScalar(rows *sql.Rows, dst any) (bool, error) {
 	defer rows.Close()
@@ -378,7 +519,12 @@ func (m *Model[T]) Insert(value any) (sql.Result, error) {
 		}
 	}
 
-	sqlStr, vals, _, err := m.buildInsert(value)
+	// BeforeInsert 模型事件（监听器可返回错误中断插入）。
+	if err := m.fireModelEvent(m.ctx, EventBeforeInsert, value, nil); err != nil {
+		return nil, err
+	}
+
+	sqlStr, vals, _, err := m.buildInsert(value, false)
 	if err != nil {
 		return nil, err
 	}
@@ -401,6 +547,10 @@ func (m *Model[T]) Insert(value any) (sql.Result, error) {
 			}
 		}
 	}
+	// AfterInsert 模型事件。
+	if err := m.fireModelEvent(m.ctx, EventAfterInsert, value, res); err != nil {
+		return res, err
+	}
 	return res, nil
 }
 
@@ -415,7 +565,7 @@ func (m *Model[T]) Upsert(value any, conflictColumns ...string) (sql.Result, err
 		injectAutoTimestamp(value, m.autoUpdateTime)
 	}
 
-	sqlStr, vals, columns, err := m.buildInsert(value)
+	sqlStr, vals, columns, err := m.buildInsert(value, false)
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +579,7 @@ func (m *Model[T]) Upsert(value any, conflictColumns ...string) (sql.Result, err
 	return m.runExec(sqlStr+clause, vals...)
 }
 
-func (m *Model[T]) buildInsert(value any) (string, []any, []string, error) {
+func (m *Model[T]) buildInsert(value any, ignore bool) (string, []any, []string, error) {
 	cols, vals, err := decompose(value)
 	if err != nil {
 		return "", nil, nil, err
@@ -438,7 +588,8 @@ func (m *Model[T]) buildInsert(value any) (string, []any, []string, error) {
 		return "", nil, nil, ErrInvalidTable
 	}
 	var b strings.Builder
-	b.WriteString("INSERT INTO ")
+	b.WriteString(insertKeyword(m.dial, ignore)) // INSERT / INSERT IGNORE / INSERT OR IGNORE
+	b.WriteString(" ")
 	b.WriteString(m.dial.Quote(m.table))
 	b.WriteString(" (")
 	quoted := make([]string, len(cols))
@@ -453,7 +604,27 @@ func (m *Model[T]) buildInsert(value any) (string, []any, []string, error) {
 	}
 	b.WriteString(strings.Join(ph, ", "))
 	b.WriteString(")")
+	// PostgreSQL 等使用 ON CONFLICT DO NOTHING 实现忽略冲突。
+	if ignore && m.dial.Name() == "postgres" {
+		b.WriteString(" ON CONFLICT DO NOTHING")
+	}
 	return b.String(), vals, cols, nil
+}
+
+// insertKeyword 返回 INSERT 关键字前缀：ignore 时按方言适配
+// （mysql: INSERT IGNORE；sqlite: INSERT OR IGNORE；postgres: INSERT 配合 ON CONFLICT DO NOTHING）。
+func insertKeyword(dial Dialect, ignore bool) string {
+	if !ignore {
+		return "INSERT INTO"
+	}
+	switch dial.Name() {
+	case "mysql":
+		return "INSERT IGNORE"
+	case "sqlite":
+		return "INSERT OR IGNORE"
+	default:
+		return "INSERT"
+	}
 }
 
 func withoutColumns(columns, excluded []string) []string {
@@ -473,11 +644,39 @@ func withoutColumns(columns, excluded []string) []string {
 	return filtered
 }
 
-// InsertIgnore 同 Insert，但冲突忽略（MySQL: INSERT IGNORE）。
+// InsertIgnore 插入新记录，若发生唯一键/主键冲突则忽略（不报错）。
+// 按方言适配：MySQL 使用 INSERT IGNORE，SQLite 使用 INSERT OR IGNORE，
+// PostgreSQL 使用 INSERT ... ON CONFLICT DO NOTHING；其余方言退化为普通 INSERT。
+// 注意：依赖数据库唯一约束，调用方需保证目标表存在相应约束。
 func (m *Model[T]) InsertIgnore(value any) (sql.Result, error) {
-	res, err := m.Insert(value)
+	if !m.disableHooks {
+		if s, ok := newZero[T]().(BeforeInserter); ok {
+			if err := s.BeforeInsert(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := m.fireModelEvent(m.ctx, EventBeforeInsert, value, nil); err != nil {
+		return nil, err
+	}
+
+	sqlStr, vals, _, err := m.buildInsert(value, true)
 	if err != nil {
 		return nil, err
+	}
+	res, err := m.runExec(sqlStr, vals...)
+	if err != nil {
+		return nil, err
+	}
+	if !m.disableHooks {
+		if s, ok := newZero[T]().(AfterInserter); ok {
+			if err := s.AfterInsert(); err != nil {
+				return res, err
+			}
+		}
+	}
+	if err := m.fireModelEvent(m.ctx, EventAfterInsert, value, res); err != nil {
+		return res, err
 	}
 	return res, nil
 }
@@ -486,11 +685,28 @@ func (m *Model[T]) InsertIgnore(value any) (sql.Result, error) {
 // 区别于单独调用 Insert/Update：Save 会触发 BeforeSave/AfterSave 钩子，
 // 且依据主键自动路由，适合「有则更新、无则插入」的场景。
 func (m *Model[T]) Save(value any) (sql.Result, error) {
+	// BeforeSave 模型事件（监听器可返回错误中断保存）。
+	if err := m.fireModelEvent(m.ctx, EventBeforeSave, value, nil); err != nil {
+		return nil, err
+	}
+
+	var res sql.Result
+	var err error
 	if col, pk, ok := primaryKeyOf(value); ok && !isZero(reflect.ValueOf(pk)) {
 		// 已存在记录：以主键为 WHERE 执行 Update，避免全表更新。
-		return m.WhereEQ(col, pk).Update(value)
+		res, err = m.WhereEQ(col, pk).Update(value)
+	} else {
+		res, err = m.Insert(value)
 	}
-	return m.Insert(value)
+	if err != nil {
+		return res, err
+	}
+
+	// AfterSave 模型事件。
+	if err := m.fireModelEvent(m.ctx, EventAfterSave, value, res); err != nil {
+		return res, err
+	}
+	return res, nil
 }
 
 // primaryKeyOf 返回 value（struct 或指针）的主键列名与主键值。
@@ -550,6 +766,11 @@ func (m *Model[T]) Update(value any) (sql.Result, error) {
 		}
 	}
 
+	// BeforeUpdate 模型事件（监听器可返回错误中断更新）。
+	if err := m.fireModelEvent(m.ctx, EventBeforeUpdate, value, nil); err != nil {
+		return nil, err
+	}
+
 	cols, vals, err := decompose(value)
 	if err != nil {
 		return nil, err
@@ -590,6 +811,10 @@ func (m *Model[T]) Update(value any) (sql.Result, error) {
 			}
 		}
 	}
+	// AfterUpdate 模型事件。
+	if err := m.fireModelEvent(m.ctx, EventAfterUpdate, value, res); err != nil {
+		return res, err
+	}
 	return res, nil
 }
 
@@ -597,20 +822,27 @@ func (m *Model[T]) Update(value any) (sql.Result, error) {
 func (m *Model[T]) Delete() (sql.Result, error) {
 	// 检查是否启用软删除
 	var zero T
-	sdCol, hasSD := hasSoftDelete(&zero)
+	sdCol, sdKind, hasSD := hasSoftDelete(&zero)
 
 	if hasSD {
-		return m.softDeleteExec(sdCol)
+		return m.softDeleteExec(sdCol, sdKind)
 	}
 
+	// 同一份零实例同时用于 hook 断言与模型事件，避免重复分配。
+	hook := newZero[T]()
 	// BeforeDelete hook
 	if !m.disableHooks {
 		// 尝试构造新实例调用钩子
-		if s, ok := newZero[T]().(BeforeDeleter); ok {
+		if s, ok := hook.(BeforeDeleter); ok {
 			if err := s.BeforeDelete(); err != nil {
 				return nil, err
 			}
 		}
+	}
+
+	// BeforeDelete 模型事件（监听器可返回错误中断删除）。
+	if err := m.fireModelEvent(m.ctx, EventBeforeDelete, hook, nil); err != nil {
+		return nil, err
 	}
 
 	var b strings.Builder
@@ -627,45 +859,94 @@ func (m *Model[T]) Delete() (sql.Result, error) {
 
 	// AfterDelete hook
 	if !m.disableHooks {
-		if s, ok := newZero[T]().(AfterDeleter); ok {
+		if s, ok := hook.(AfterDeleter); ok {
 			if err := s.AfterDelete(); err != nil {
 				return res, err
 			}
 		}
 	}
+	// AfterDelete 模型事件。
+	if err := m.fireModelEvent(m.ctx, EventAfterDelete, hook, res); err != nil {
+		return res, err
+	}
 	return res, nil
 }
 
-// softDeleteExec 执行软删除（UPDATE SET deleted_at = NOW()）。
-func (m *Model[T]) softDeleteExec(sdCol string) (sql.Result, error) {
+// softDeleteExec 执行软删除（UPDATE SET deleted_at = <当前时间>）。
+// kind 为 "time"（SoftDelete，time.Time 语义）或 "int"（SoftDeleteInt，Unix 秒 int64 语义）。
+//
+// 实现说明：
+//   - time 类型：优先使用方言的 Now() 表达式（服务端时间，时区由数据库保证）；
+//     若方言未实现 NowDialect 可选扩展（如第三方自定义方言），则回退为绑定 time.Now() 参数
+//     ——对所有已注册方言都安全，不再硬编码 Name() 分支，避免自定义驱动产生错误 SQL。
+//   - int 类型：始终绑定 time.Now().Unix() 参数，因为软删除列是 BIGINT，SQL 时间戳函数
+//     会产生类型不匹配；参数化写法跨驱动一致可用。
+func (m *Model[T]) softDeleteExec(sdCol, kind string) (sql.Result, error) {
+	zero := newZero[T]()
+	// BeforeDelete hook（软删除同样视为删除，需与物理删除保持钩子对称）。
+	if !m.disableHooks {
+		if s, ok := zero.(BeforeDeleter); ok {
+			if err := s.BeforeDelete(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// BeforeDelete 模型事件。
+	if err := m.fireModelEvent(m.ctx, EventBeforeDelete, zero, nil); err != nil {
+		return nil, err
+	}
+
 	var b strings.Builder
 	b.WriteString("UPDATE ")
 	b.WriteString(m.dial.Quote(m.table))
 	b.WriteString(" SET ")
 	b.WriteString(m.dial.Quote(sdCol))
 	b.WriteString(" = ")
-	switch m.dial.Name() {
-	case "mysql":
-		b.WriteString("NOW()")
-	case "postgres":
-		b.WriteString("CURRENT_TIMESTAMP")
-	case "sqlite":
-		b.WriteString("datetime('now')")
+
+	var args []any
+	switch kind {
+	case "int":
+		// SoftDeleteInt：绑定 Unix 秒整数参数。
+		b.WriteString(m.dial.Placeholder(0))
+		args = []any{time.Now().Unix()}
 	default:
-		b.WriteString("CURRENT_TIMESTAMP")
+		// SoftDelete（time 语义）：优先方言表达式，回退为绑定参数。
+		if nd, ok := m.dial.(NowDialect); ok {
+			b.WriteString(nd.Now())
+		} else {
+			b.WriteString(m.dial.Placeholder(0))
+			args = []any{time.Now()}
+		}
 	}
 
-	args := m.appendWheres(&b, nil)
+	args = m.appendWheres(&b, args)
 	if len(m.wheres) == 0 && !m.allowAll {
 		return nil, ErrNoWhere
 	}
-	return m.runExec(b.String(), args...)
+	res, err := m.runExec(b.String(), args...)
+	if err != nil {
+		return res, err
+	}
+
+	// AfterDelete hook
+	if !m.disableHooks {
+		if s, ok := zero.(AfterDeleter); ok {
+			if err := s.AfterDelete(); err != nil {
+				return res, err
+			}
+		}
+	}
+	// AfterDelete 模型事件（软删除视为删除，便于统一监听）。
+	if err := m.fireModelEvent(m.ctx, EventAfterDelete, zero, res); err != nil {
+		return res, err
+	}
+	return res, nil
 }
 
 // Restore 恢复软删除记录（SET deleted_at = NULL）。
 func (m *Model[T]) Restore() (sql.Result, error) {
 	var zero T
-	sdCol, hasSD := hasSoftDelete(&zero)
+	sdCol, _, hasSD := hasSoftDelete(&zero)
 	if !hasSD {
 		return nil, ErrInvalidTable
 	}

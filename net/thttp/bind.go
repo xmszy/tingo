@@ -11,23 +11,38 @@ import (
 // BindAndValid 将请求体/查询参数绑定到 req 指针，并用 tvalid 校验。
 // 返回校验错误时，直接将 400 响应写入 c 并返回 true（调用方应中止）。
 //
+// scene 为可选的场景名（验证场景）：传入时按场景规则校验，
+// 覆盖 req 上 tdb tag 的 scene 约束。空字符串表示不启用场景。
+//
 // 用法：
 //
 //	var req LoginReq
 //	if thttp.BindAndValid(c, &req) {
 //	    return
 //	}
-func BindAndValid(c *core.Ctx, req any) bool {
+//	// 按场景校验：
+//	if thttp.BindAndValid(c, &req, "create") {
+//	    return
+//	}
+func BindAndValid(c *core.Ctx, req any, scene ...string) bool {
 	g := (*gin.Context)(c)
 	if err := g.ShouldBind(req); err != nil {
 		WriteError(g, http.StatusBadRequest, 1, err)
 		return true
 	}
-	if err := tvalid.CheckStruct(req); err != nil {
+	if err := validateStructWithScene(req, scene...); err != nil {
 		WriteError(g, http.StatusBadRequest, 1, err)
 		return true
 	}
 	return false
+}
+
+// validateStructWithScene 按场景校验结构体：有场景时走 CheckStructWithScene，否则走 CheckStruct。
+func validateStructWithScene(req any, scene ...string) error {
+	if len(scene) > 0 && scene[0] != "" {
+		return tvalid.CheckStructWithScene(req, scene[0])
+	}
+	return tvalid.CheckStruct(req)
 }
 
 // WriteData 写入标准 JSON 响应：{code, message, data}。

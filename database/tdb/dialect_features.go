@@ -33,6 +33,15 @@ type ReturningDialect interface {
 	ReturningClause(columns []string) (ReturningClause, error)
 }
 
+// NowDialect 是 Dialect 的可选扩展：提供「当前时间」的 SQL 表达式。
+// 软删除默认通过绑定 time.Time 参数写入（对所有已注册方言都安全），
+// 若方言实现 NowDialect，则对 time 类型软删除字段优先使用服务端时间表达式
+// （如 NOW()/CURRENT_TIMESTAMP/datetime('now')），避免依赖客户端时区。
+// 该扩展不破坏已有第三方方言实现（可选实现）。
+type NowDialect interface {
+	Now() string
+}
+
 // BuildUpsertClause 通过当前连接的方言生成 Upsert 子句。
 func (db *DB) BuildUpsertClause(spec UpsertSpec) (string, error) {
 	if err := db.RequireCapability(CapabilityUpsert); err != nil {

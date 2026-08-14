@@ -276,6 +276,13 @@ func (e *Engine) boot() error {
 	if err := e.applyConfig(cfg); err != nil {
 		return err
 	}
+	// 全局请求体大小限制：在业务路由之前注册，读取 e.cfg.MaxBody（请求期生效）。
+	if cfg.MaxBody > 0 {
+		e.gin.Use(func(c *gin.Context) {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, cfg.MaxBody)
+			c.Next()
+		})
+	}
 	for _, configure := range e.configurators {
 		if err := configure(tree); err != nil {
 			return err
@@ -308,6 +315,9 @@ func (e *Engine) boot() error {
 
 // mountApp 为一个应用建立路由组。
 func (e *Engine) mountApp(info core.AppInfo) (core.Router, error) {
+	// 计算本应用的路由前缀：版本前缀（如 /v1）+ 应用前缀（如 /api）。
+	groupPath := effectivePrefix(e.cfg.Version, info.Config.Prefix)
+
 	var (
 		group    gin.IRouter
 		basePath string
@@ -318,7 +328,7 @@ func (e *Engine) mountApp(info core.AppInfo) (core.Router, error) {
 		// 域名绑定：域名无法进入 radix tree（gin 只按路径匹配），
 		// 因此挂在根路径并用中间件做一次 Host 校验，不匹配则放行给其他应用。
 		// 这是唯一有运行时字符串比较的场景，且仅影响域名绑定的应用。
-		g := e.gin.Group("")
+		g := e.gin.Group(groupPath)
 		domain := info.Config.Domain
 		g.Use(func(c *gin.Context) {
 			if !hostMatches(c.Request.Host, domain) {
@@ -329,13 +339,10 @@ func (e *Engine) mountApp(info core.AppInfo) (core.Router, error) {
 			}
 			c.Next()
 		})
-		group, basePath = g, ""
-
-	case info.Config.Default || info.Config.Prefix == "/":
-		group, basePath = e.gin.Group(""), ""
+		group, basePath = g, groupPath
 
 	default:
-		group, basePath = e.gin.Group(info.Config.Prefix), info.Config.Prefix
+		group, basePath = e.gin.Group(groupPath), groupPath
 	}
 
 	if mw, ok := info.App.(core.AppMiddlewarer); ok {
@@ -350,6 +357,25 @@ func (e *Engine) mountApp(info core.AppInfo) (core.Router, error) {
 		engine:   e,
 		basePath: basePath,
 	}, nil
+}
+
+// effectivePrefix 合并版本前缀与业务前缀，得到最终路由组路径。
+// 例如 version="v1", prefix="/api" => "/v1/api"；version="" => "/api"；都为空 => "/"。
+func effectivePrefix(version, prefix string) string {
+	if prefix == "" || prefix == "/" {
+		prefix = ""
+	}
+	if version != "" {
+		v := "/" + strings.Trim(version, "/")
+		if prefix == "" {
+			return v
+		}
+		return v + prefix
+	}
+	if prefix == "" {
+		return "/"
+	}
+	return prefix
 }
 
 // hostMatches 判断请求 Host 是否匹配绑定域名（忽略端口）。

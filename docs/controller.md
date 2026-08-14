@@ -136,3 +136,47 @@ func Register(r t.Router) {
 ~~~
 
 `AutoRoute` 内部按控制器前缀长度降序注册，长前缀优先匹配。
+
+## 依赖注入（DI）
+
+控制器声明带 `inject:""` 标签的字段，框架在 `Kernel.Boot` 完成所有 `provider` 绑定后
+自动从容器解析并填充（对标 Tingo 的属性注入），无需在 `init()` 中手动 `New`。
+
+~~~go
+package controller
+
+import (
+    "github.com/xmszy/tingo/frame"
+    "github.com/xmszy/tingo/tapp"
+    "app/service"
+)
+
+func init() {
+    t.RegisterController("/user", &User{})
+}
+
+type User struct {
+    t.Controller
+    Svc *service.UserService `inject:""`   // Boot 时由容器自动注入
+}
+
+// BindService 在装配期把服务绑定到容器（application 的 provider 里）。
+func init() {
+    t.Provide(func() *service.UserService {
+        return service.NewUserService()
+    })
+}
+
+func (u *User) List(c *t.Ctx) error {
+    list, err := u.Svc.List(1, 20)   // 直接使用注入的 Svc
+    if err != nil {
+        return err
+    }
+    return t.Success(c, list)
+}
+~~~
+
+**要点：**
+- 注入时机：在所有 `provider` 之后执行，因此服务依赖要先于控制器绑定好。
+- 未绑定的类型会令 `Boot` 返回错误，启动期即可暴露装配问题。
+- 字段需为导出（首字母大写）且带 `inject` 标签。

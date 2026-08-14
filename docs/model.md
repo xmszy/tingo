@@ -205,6 +205,78 @@ func ArticleDetail(id int) (Article, error) {
 }
 ~~~
 
+## 便捷查询方法
+
+在 `Scan/Find/Exists/Count` 之上，`Model[T]` 还提供对标 Tingo 常用写法的便捷方法：
+
+~~~go
+// FindOrFail：查不到返回 ErrNoRows（便于上层决定 404）
+u, err := t.Model[User]().WhereEQ("id", 1).FindOrFail()
+if errors.Is(err, tdb.ErrNoRows) {
+    return t.Fail(c, "用户不存在")
+}
+
+// FirstOrCreate：存在返回，不存在按默认值插入
+u, err := t.Model[User]().FirstOrCreate(
+    func(q *tdb.Model[User]) *tdb.Model[User] {
+        return q.WhereEQ("openid", openid)
+    },
+    User{Name: "guest", Status: 1},
+)
+
+// ChunkById：按主键游标分批遍历大表（对标 Tingo chunkById）
+err := t.Model[User]().ChunkById(100, func(items []User) (bool, error) {
+    for _, it := range items {
+        _ = process(it)
+    }
+    return true, nil   // 返回 false 可提前终止
+})
+~~~
+
+## 查询作用域（Scope）
+
+把可复用的查询片段封装为 `ScopeFunc[T]`，对标 Tingo 的查询作用域：
+
+~~~go
+func OnlyAdult(m *tdb.Model[User]) *tdb.Model[User] {
+    return m.Where("age >= ?", 18)
+}
+
+// 使用
+users, _ := t.Model[User]().Scopes(OnlyAdult).Order("age desc").All()
+
+// 也可链式追加多个作用域
+users, _ := t.Model[User]().Scope(OnlyAdult).Scope(OrderByAge).All()
+~~~
+
+> Scope 在查询执行时（All/One/Paginate）仅应用一次，后续克隆不会重复叠加。
+
+## 模型事件
+
+在增删改前后挂载钩子，对标 Tingo 的模型事件：
+
+~~~go
+m := t.Model[User]()
+
+// 方法式监听
+m.OnBeforeInsert(func(ctx context.Context, data User) error {
+    if data.Age < 0 {
+        return errors.New("age invalid")
+    }
+    return nil   // 返回 error 可中止本次操作
+})
+m.OnAfterInsert(func(ctx context.Context, data User) error {
+    tevent.Bus().Publish("user.created", data)
+    return nil
+})
+
+// 或在 Model 上覆盖钩子方法（全局生效）
+func (User) BeforeInsert(ctx context.Context, data User) error { ... }
+~~~
+
+支持的事件：`BeforeInsert/AfterInsert`、`BeforeUpdate/AfterUpdate`、`BeforeDelete/AfterDelete`。
+Before 事件返回错误会中止对应操作。
+
 ## 与 Tingo 模型的差异
 
 | Tingo | tingo | 说明 |

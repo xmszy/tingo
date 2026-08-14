@@ -104,7 +104,7 @@ func metaFor(t reflect.Type) *structMeta {
 		fieldIdx[f.Name] = i
 	}
 
-	sdCol, _ := softDeleteField(t)
+	sdCol, _, _ := softDeleteField(t)
 	m = &structMeta{fields: fields, colIndex: colIdx, fieldIndex: fieldIdx, softDeleteCol: sdCol}
 	metaCache[t] = m
 	return m
@@ -118,12 +118,14 @@ func rowsToModels[T any](rows *sql.Rows) ([]T, error) {
 		return nil, err
 	}
 	meta := metaFor(reflect.TypeFor[T]())
+	// 复用扫描缓冲：循环外分配一次，每行 Scan 覆盖复用，避免逐行 new(any) 的小对象分配。
+	cells := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range cols {
+		ptrs[i] = &cells[i]
+	}
 	var out []T
 	for rows.Next() {
-		ptrs := make([]any, len(cols))
-		for i := range cols {
-			ptrs[i] = new(any)
-		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, err
 		}
@@ -131,7 +133,7 @@ func rowsToModels[T any](rows *sql.Rows) ([]T, error) {
 		vv := reflect.ValueOf(&v).Elem()
 		for i, c := range cols {
 			if idx, ok := meta.colIndex[c]; ok {
-				assignField(vv.Field(idx), *(ptrs[i].(*any)))
+				assignField(vv.Field(idx), cells[i])
 			}
 		}
 		out = append(out, v)
@@ -148,17 +150,19 @@ func rowsToMaps(rows *sql.Rows) ([]map[string]any, error) {
 		return nil, err
 	}
 	var out []map[string]any
+	// 复用扫描缓冲：循环外分配一次，每行 Scan 覆盖复用。
+	cells := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range cols {
+		ptrs[i] = &cells[i]
+	}
 	for rows.Next() {
-		ptrs := make([]any, len(cols))
-		for i := range cols {
-			ptrs[i] = new(any)
-		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, err
 		}
 		m := make(map[string]any, len(cols))
 		for i, c := range cols {
-			m[c] = *(ptrs[i].(*any))
+			m[c] = cells[i]
 		}
 		out = append(out, m)
 	}
@@ -176,9 +180,11 @@ func rowToModel[T any](rows *sql.Rows, dst *T) (bool, error) {
 		return false, err
 	}
 	meta := metaFor(reflect.TypeOf(dst).Elem())
+	// 复用扫描缓冲（单行仍是一次分配，避免每调用 new(any)）。
+	cells := make([]any, len(cols))
 	ptrs := make([]any, len(cols))
 	for i := range cols {
-		ptrs[i] = new(any)
+		ptrs[i] = &cells[i]
 	}
 	if err := rows.Scan(ptrs...); err != nil {
 		return false, err
@@ -186,7 +192,7 @@ func rowToModel[T any](rows *sql.Rows, dst *T) (bool, error) {
 	vv := reflect.ValueOf(dst).Elem()
 	for i, c := range cols {
 		if idx, ok := meta.colIndex[c]; ok {
-			assignField(vv.Field(idx), *(ptrs[i].(*any)))
+			assignField(vv.Field(idx), cells[i])
 		}
 	}
 	return true, nil

@@ -157,7 +157,12 @@ func (a *App) HasService(name string) bool {
 // Router 定义了路由注册接口。
 type Router interface {
 	Use(handler ...Handler) Router
+	// UseOrdered 按优先级升序追加中间件（数值越小越先执行，同级保序）。
+	UseOrdered(mws ...WeightedMiddleware) Router
 	Group(relativePath string, fn func(Router), mws ...Handler) Router
+	// Module 创建按模块名隔离的子路由组。
+	// 自动套 /{module} 前缀并与外层中间件隔离，模块内再 Group 时基于该前缀展开。
+	Module(name string, fn func(Router), mws ...Handler) Router
 	GET(path string, handler any) Router
 	POST(path string, handler any) Router
 	PUT(path string, handler any) Router
@@ -209,7 +214,7 @@ type AppInfo struct {
 }
 
 // AppConfigProvider 由上层（如 frame/t）注入，用于根据框架配置动态解析每个应用的
-// AppConfig（对标 ThinkPHP config/app.php 的 default_app/app_map/domain_bind/deny_app）。
+// AppConfig（多应用路由：default_app/app_map/domain_bind/deny_app）。
 // 接收应用名与注册期的基础配置，返回最终生效的配置。在引擎 Boot 阶段（配置已加载）调用。
 // 未注入则直接使用注册期设定的 AppConfig。
 var AppConfigProvider func(name string, base AppConfig) AppConfig

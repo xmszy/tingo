@@ -9,7 +9,7 @@ import (
 	"github.com/xmszy/tingo/database/tdb"
 )
 
-func TestLoadConfigResolvesThinkPHPStyleConnection(t *testing.T) {
+func TestLoadConfigResolvesEnvStyleConnection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "database.toml")
 	t.Setenv("TEST_DB_HOST", "db.internal")
 	content := `default = "primary"
@@ -43,7 +43,7 @@ max_open = 12
 	}
 }
 
-func TestLoadConfigUsesThinkPHPEnvironmentNamesAndDefaults(t *testing.T) {
+func TestLoadConfigUsesEnvStyleNamesAndDefaults(t *testing.T) {
 	for _, name := range []string{"DB_DRIVER", "DB_TYPE", "DB_HOST", "DB_NAME", "DB_USER", "DB_PASS", "DB_PORT", "DB_CHARSET", "DB_PREFIX"} {
 		t.Setenv(name, "")
 	}

@@ -2,6 +2,7 @@ package tdb
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -30,6 +31,11 @@ type Schema struct {
 // SchemaTool 从 DB 实例创建 Schema 工具。
 func (db *DB) SchemaTool() *Schema {
 	return &Schema{db: db, dial: db.Dialect()}
+}
+
+// AutoMigrate 按模型自动建表/补列（schema 自动对齐）。详见 Schema.AutoMigrate。
+func (db *DB) AutoMigrate(models ...any) error {
+	return db.SchemaTool().AutoMigrate(models...)
 }
 
 // SchemaFromTx 从 Tx 实例创建 Schema（操作在同一事务中）。
@@ -256,7 +262,101 @@ func (s *Schema) DropIndex(tableName, indexName string) error {
 	return err
 }
 
-// exec 执行 DDL 语句。
+// columnsMapFromModel 返回模型字段生成的「列名 -> 完整列定义」映射。
+func columnsMapFromModel(model any, dial Dialect) map[string]string {
+	m := make(map[string]string)
+	for _, col := range columnsFromModel(model, dial) {
+		// col 形如 "`id` BIGINT ..."，解析首个被引号包裹的列名为键。
+		name, _, _ := strings.Cut(col, " ")
+		name = strings.Trim(name, "`\"[]")
+		m[name] = col
+	}
+	return m
+}
+
+// AutoMigrate 按模型自动建表/补列（schema 自动对齐）。
+//
+// 行为：
+//   - 表不存在：通过 CreateTableFrom 创建（内部 CREATE TABLE IF NOT EXISTS，幂等）。
+//   - 表存在且方言注册了 SchemaDriver（InspectTable 可用）：对比模型字段，
+//     为缺失的列执行 AddColumn（新增列安全）；默认【不】做已有列的类型修改
+//     （类型变更跨 dialect 不可靠且可能丢数据，需显式迁移处理）。
+//   - 表存在但未注册 SchemaDriver（无法内省）：仅保证表存在，不补列。
+//
+// 调用示例：
+//
+//	db.AutoMigrate(&User{}, &Order{})
+func (s *Schema) AutoMigrate(models ...any) error {
+	for _, m := range models {
+		prefix := ""
+		if s.db != nil {
+			prefix = s.db.cfg.Prefix
+		}
+		model := newZeroModel(m, prefix)
+		table := model.table
+		desired := columnsMapFromModel(m, s.dial)
+
+		meta, err := s.db.InspectTable(table)
+		if err != nil {
+			if errors.Is(err, ErrTableNotFound) {
+				// 表不存在：创建。
+				if cerr := s.CreateTableFrom(m); cerr != nil {
+					return cerr
+				}
+				continue
+			}
+			// 无法内省（多半未注册 SchemaDriver）：退化为仅保证表存在。
+			if cerr := s.CreateTableFrom(m); cerr != nil {
+				return cerr
+			}
+			continue
+		}
+		// 表存在：补齐缺失列。
+		existing := make(map[string]bool, len(meta.Columns))
+		for _, c := range meta.Columns {
+			existing[c.Name] = true
+		}
+		for name, def := range desired {
+			if existing[name] {
+				continue
+			}
+			if aerr := s.AddColumn(table, def, ""); aerr != nil {
+				return aerr
+			}
+		}
+	}
+	return nil
+}
+
+// newZeroModel 由任意模型指针构造一个 Model 以读取表名（与 Model 内部一致）。
+func newZeroModel(m any, prefix string) *Model[any] {
+	table := modelTableName(m, prefix)
+	return &Model[any]{table: table}
+}
+
+// modelTableName 由模型值推断表名：TableName() 接口 > 类型名 snake_case，并应用前缀。
+func modelTableName(m any, prefix string) string {
+	rt := reflectTypeOf(m)
+	table := resolveTableByName(rt)
+	if prefix != "" && !strings.HasPrefix(table, prefix) {
+		table = prefix + table
+	}
+	return table
+}
+
+// resolveTableByName 与 Model.resolveTable 等价的非泛型版本。
+func resolveTableByName(rt reflect.Type) string {
+	if rt.Kind() == reflect.Pointer {
+		rt = rt.Elem()
+	}
+	if tn, ok := reflect.New(rt).Interface().(tableNamer); ok {
+		if name := tn.TableName(); name != "" {
+			return name
+		}
+	}
+	return toSnake(rt.Name())
+}
+
 func (s *Schema) exec(sqlStr string, args ...any) (sql.Result, error) {
 	if s.tx != nil {
 		return s.tx.exec(sqlStr, args...)

@@ -27,6 +27,13 @@ type Config struct {
 	MaxHeaderBytes int
 	// MaxMultipartMemory 是 multipart 表单在内存中的最大字节数。
 	MaxMultipartMemory int64
+	// MaxBody 限制请求体大小（字节），0 表示不限制。
+	// 防止恶意大 POST 打满连接/内存——超限时 c.Request.Body 读取返回
+	// http.MaxBytesReader 对应的 ErrStatusRequestEntityTooLarge，由 Recover 中间件兜底。
+	MaxBody int64
+	// Version 是 API 版本前缀（如 "v1"）。非空时所有路由自动挂载于 /{version} 下，
+	// 例如 Version="v1" 时 /user/list 变为 /v1/user/list。便于无侵入地做 API 版本化。
+	Version string
 
 	// CertFile 与 KeyFile 非空时启用 HTTPS。
 	CertFile string
@@ -61,6 +68,7 @@ func defaultConfig() Config {
 		ShutdownTimeout:        10 * time.Second,
 		MaxHeaderBytes:         1 << 20,  // 1 MiB
 		MaxMultipartMemory:     32 << 20, // 32 MiB
+		MaxBody:                0,        // 0 = 不限制
 		RedirectTrailingSlash:  true,
 		HandleMethodNotAllowed: true,
 		BindRouteMeta:          true,

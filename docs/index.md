@@ -54,6 +54,7 @@ Tingo 是 Tingo 风格的 Go Web 框架，本手册对标 [Tingo 8.0 开发手�
 ## 模型
 
 - [模型](./model.md) —— 泛型 Model/查询/新增/更新/删除/表名推断/列名标签/完整示例
+- [读写分离](./read_write_split.md) —— ReadDSNs 配置/Master 强制主库/事务内强一致
 
 ## 视图
 

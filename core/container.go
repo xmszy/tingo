@@ -1,6 +1,7 @@
 package core
 
 import (
+	"maps"
 	stderrors "errors"
 	"fmt"
 	"reflect"
@@ -21,9 +22,16 @@ import (
 type Container struct {
 	mu          sync.RWMutex
 	providers   atomic.Pointer[map[reflect.Type]*binding]
+	named       atomic.Pointer[map[namedKey]*binding]
 	parent      *Container
 	constructed []any
 	closed      bool
+}
+
+// namedKey 是命名绑定的复合键：类型 + 名称。
+type namedKey struct {
+	t    reflect.Type
+	name string
 }
 
 // binding 是一条服务绑定记录。
@@ -45,6 +53,8 @@ func NewContainer() *Container {
 	c := &Container{}
 	p := make(map[reflect.Type]*binding, 16)
 	c.providers.Store(&p)
+	n := make(map[namedKey]*binding, 8)
+	c.named.Store(&n)
 	return c
 }
 
@@ -60,6 +70,12 @@ func (c *Container) NewScope() *Container {
 		}
 	}
 	child.providers.Store(&p)
+	pn := c.named.Load()
+	nn := make(map[namedKey]*binding, 4)
+	if pn != nil {
+		maps.Copy(nn, *pn)
+	}
+	child.named.Store(&nn)
 	return child
 }
 
@@ -107,6 +123,137 @@ func bindType[T any](c *Container, f func(*Container) (any, error), shared bool)
 // typeKey 返回类型 T 的反射类型，作为容器键。
 func typeKey[T any]() reflect.Type {
 	return reflect.TypeFor[T]()
+}
+
+/* ------------------------------------------------------------------ */
+/* 接口绑定                                                            */
+/* ------------------------------------------------------------------ */
+
+// BindInterface 将接口类型 I 绑定到返回 T 的工厂。调用方通常用具体类型构造并断言实现 I。
+//
+//	core.BindInterface[Repository, *MySQLRepo](c, func(c *core.Container) (*MySQLRepo, error) {
+//	    return &MySQLRepo{}, nil
+//	})
+//
+// 之后即可 core.Resolve[Repository](c) 取到 *MySQLRepo（按接口 I 作为键）。
+// 工厂返回值若不实现 I 会返回错误。
+func BindInterface[I any, T any](c *Container, factory func(*Container) (T, error)) {
+	bindType[I](c, func(c *Container) (any, error) {
+		v, err := factory(c)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := any(v).(I); !ok {
+			return nil, terrors.ErrInternal.WithMessagef(
+				"tingo: %T does not implement %s", v, reflect.TypeFor[I]())
+		}
+		return v, nil
+	}, true)
+}
+
+/* ------------------------------------------------------------------ */
+/* 命名绑定                                                            */
+/* ------------------------------------------------------------------ */
+
+// BindNamed 按名称绑定类型 T 的懒加载单例工厂，与无名称绑定相互独立。
+//
+//	core.BindNamed[*Cache](c, "redis", func(c *core.Container) (*Cache, error) { ... })
+//	v := core.MustResolveNamed[*Cache](c, "redis")
+func BindNamed[T any](c *Container, name string, factory func(*Container) (T, error)) {
+	bindNamed[T](c, name, func(c *Container) (any, error) { return factory(c) }, true)
+}
+
+// BindNamedTransient 按名称绑定为瞬时服务。
+func BindNamedTransient[T any](c *Container, name string, factory func(*Container) (T, error)) {
+	bindNamed[T](c, name, func(c *Container) (any, error) { return factory(c) }, false)
+}
+
+// BindNamedValue 按名称直接绑定一个已构造的实例。
+func BindNamedValue[T any](c *Container, name string, v T) {
+	bindNamed[T](c, name, func(*Container) (any, error) { return v, nil }, true)
+}
+
+// bindNamed 是命名绑定的内部实现（COW 语义与 bindType 一致）。
+func bindNamed[T any](c *Container, name string, f func(*Container) (any, error), shared bool) {
+	t := typeKey[T]()
+	k := namedKey{t: t, name: name}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cur := c.named.Load()
+	p := make(map[namedKey]*binding, len(*cur)+1)
+	for k, v := range *cur {
+		p[k] = v
+	}
+	p[k] = &binding{factory: f, shared: shared}
+	c.named.Store(&p)
+}
+
+// ResolveNamed 按名称解析类型 T 的实例。
+func ResolveNamed[T any](c *Container, name string) (T, error) {
+	var zero T
+	t := typeKey[T]()
+	k := namedKey{t: t, name: name}
+
+	p := c.named.Load()
+	var b *binding
+	var ok bool
+	if p != nil {
+		b, ok = (*p)[k]
+	}
+	if !ok {
+		// 回退：命名未命中时尝试无名称绑定（常见默认实现）。
+		return Resolve[T](c)
+	}
+
+	if !b.shared {
+		v, err := b.factory(c)
+		if err != nil {
+			return zero, err
+		}
+		tv, ok := v.(T)
+		if !ok {
+			return zero, terrors.ErrInternal.WithMessagef("tingo: named service %s %s factory returned %T", name, t, v)
+		}
+		return tv, nil
+	}
+
+	b.once.Do(func() {
+		b.instance, b.err = b.factory(c)
+		if b.err == nil {
+			c.mu.Lock()
+			c.constructed = append(c.constructed, b.instance)
+			c.mu.Unlock()
+		}
+	})
+	if b.err != nil {
+		return zero, b.err
+	}
+	tv, ok := b.instance.(T)
+	if !ok {
+		return zero, terrors.ErrInternal.WithMessagef("tingo: named service %s %s factory returned %T", name, t, b.instance)
+	}
+	return tv, nil
+}
+
+// MustResolveNamed 按名称解析，失败时 panic。
+func MustResolveNamed[T any](c *Container, name string) T {
+	v, err := ResolveNamed[T](c, name)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+// HasNamed 判断命名服务是否已绑定。
+func HasNamed[T any](c *Container, name string) bool {
+	t := typeKey[T]()
+	k := namedKey{t: t, name: name}
+	p := c.named.Load()
+	if p == nil {
+		return false
+	}
+	_, ok := (*p)[k]
+	return ok
 }
 
 /* ------------------------------------------------------------------ */
@@ -164,6 +311,48 @@ func Resolve[T any](c *Container) (T, error) {
 	return tv, nil
 }
 
+// ResolveUntyped 按反射类型从容器解析实例。
+//
+// 它复用与 Resolve[T] 完全相同的绑定查找与单例缓存逻辑，区别在于键由
+// 调用方以 reflect.Type 形式提供，从而支持在反射驱动的装配（如控制器字段注入）
+// 中解析任意类型，无需调用方提供编译期泛型参数。
+func (c *Container) ResolveUntyped(t reflect.Type) (any, error) {
+	p := c.providers.Load()
+	var b *binding
+	var ok bool
+	if p != nil {
+		b, ok = (*p)[t]
+	}
+	parent := c.parent
+	if !ok {
+		if parent != nil {
+			return parent.ResolveUntyped(t)
+		}
+		return nil, terrors.ErrInternal.WithMessagef("tingo: service %s is not bound", t)
+	}
+
+	if !b.shared {
+		v, err := b.factory(c)
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	}
+
+	b.once.Do(func() {
+		b.instance, b.err = b.factory(c)
+		if b.err == nil {
+			c.mu.Lock()
+			c.constructed = append(c.constructed, b.instance)
+			c.mu.Unlock()
+		}
+	})
+	if b.err != nil {
+		return nil, b.err
+	}
+	return b.instance, nil
+}
+
 // MustResolve 解析类型 T，失败时 panic。
 // 适用于启动期装配，此时失败应立即终止进程。
 func MustResolve[T any](c *Container) T {
@@ -212,6 +401,8 @@ func (c *Container) Reset() {
 	defer c.mu.Unlock()
 	p := make(map[reflect.Type]*binding, 16)
 	c.providers.Store(&p)
+	n := make(map[namedKey]*binding, 8)
+	c.named.Store(&n)
 	c.constructed = nil
 	c.closed = false
 }
@@ -224,6 +415,10 @@ func (c *Container) String() string {
 	n := 0
 	if p != nil {
 		n = len(*p)
+	}
+	nn := c.named.Load()
+	if nn != nil {
+		n += len(*nn)
 	}
 	return fmt.Sprintf("Container(%d services)", n)
 }

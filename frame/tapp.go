@@ -22,7 +22,7 @@ func init() {
 	}
 
 	// 多应用配置驱动：根据 config/app.toml [app] 段解析每个应用的路由前缀 / 域名 / 默认 / 禁用。
-	// 对标 ThinkPHP config/app.php 的 default_app / app_map / domain_bind / deny_app。
+	// 配置项：default_app / app_map / domain_bind / deny_app。
 	core.AppConfigProvider = func(name string, base core.AppConfig) core.AppConfig {
 		cfg := base
 

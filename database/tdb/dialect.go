@@ -3,6 +3,7 @@ package tdb
 import (
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // Dialect 抽象不同数据库的 SQL 方言差异：标识符引用、占位符风格、LIMIT/OFFSET 语法。
@@ -98,6 +99,10 @@ type baseDialect struct {
 
 func (d baseDialect) Name() string { return d.name }
 
+// Now 返回当前时间的 SQL 表达式（实现 NowDialect 可选扩展）。
+// 标准 SQL 默认为 CURRENT_TIMESTAMP；特定方言在下方覆盖。
+func (d baseDialect) Now() string { return "CURRENT_TIMESTAMP" }
+
 func (d baseDialect) Quote(ident string) string {
 	if ident == "*" {
 		return ident
@@ -155,23 +160,38 @@ func (d baseDialect) Limit(limit, offset int) string {
 	}
 }
 
-// dialects 已注册方言表（按 Name 查找）。
-var dialects = map[string]Dialect{
-	"mysql": baseDialect{name: "mysql", quoteL: '`', quoteR: '`', ph: styleQuestion, lim: limitMyStyle},
-	"sqlite": sqliteDialect{baseDialect: baseDialect{
-		name: "sqlite", quoteL: '"', quoteR: '"', ph: styleQuestion, lim: limitMyStyle,
-	}},
-	"postgres":  baseDialect{name: "postgres", quoteL: '"', quoteR: '"', ph: styleDollar, lim: limitMyStyle},
-	"sqlserver": baseDialect{name: "sqlserver", quoteL: '"', quoteR: '"', ph: styleQuestion, lim: limitFetch},
-}
+// dialects 已注册方言表（按 Name 查找）。注册/查找均加锁，允许运行时（如插件 init）注册。
+var (
+	dialectsMu sync.RWMutex
+	dialects   = map[string]Dialect{
+		"mysql": mysqlDialect{baseDialect: baseDialect{
+			name: "mysql", quoteL: '`', quoteR: '`', ph: styleQuestion, lim: limitMyStyle,
+		}},
+		"sqlite": sqliteDialect{baseDialect: baseDialect{
+			name: "sqlite", quoteL: '"', quoteR: '"', ph: styleQuestion, lim: limitMyStyle,
+		}},
+		"postgres":  baseDialect{name: "postgres", quoteL: '"', quoteR: '"', ph: styleDollar, lim: limitMyStyle},
+		"sqlserver": baseDialect{name: "sqlserver", quoteL: '"', quoteR: '"', ph: styleQuestion, lim: limitFetch},
+	}
+)
 
-// RegisterDialect 注册自定义方言（驱动作者扩展用）。
+// mysqlDialect 仅在需要覆盖默认行为时存在（占位符/分页与 base 一致）。
+type mysqlDialect struct{ baseDialect }
+
+// Now 覆盖为 MySQL 的当前时间表达式。
+func (mysqlDialect) Now() string { return "NOW()" }
+
+// RegisterDialect 注册自定义方言（驱动作者扩展用）。线程安全。
 func RegisterDialect(d Dialect) {
+	dialectsMu.Lock()
+	defer dialectsMu.Unlock()
 	dialects[d.Name()] = d
 }
 
-// DialectFor 查找已注册方言。
+// DialectFor 查找已注册方言。线程安全。
 func DialectFor(name string) (Dialect, bool) {
+	dialectsMu.RLock()
+	defer dialectsMu.RUnlock()
 	dialect, ok := dialects[strings.ToLower(strings.TrimSpace(name))]
 	return dialect, ok
 }
@@ -181,3 +201,6 @@ func DialectFor(name string) (Dialect, bool) {
 type sqliteDialect struct{ baseDialect }
 
 func (sqliteDialect) Name() string { return "sqlite" }
+
+// Now 覆盖为 SQLite 的当前时间表达式。
+func (sqliteDialect) Now() string { return "datetime('now')" }

@@ -84,3 +84,19 @@ r.Group("/system", func(g t.Router) {
 // POST  /system/cache/clear       → CacheController.PostClear
 // ...
 ~~~
+
+## 模块隔离（Module）
+
+`Module` 是对标 Tingo「模块/控制器/动作」路径约定的便捷封装：自动套 `/{module}` 前缀
+并隔离中间件组，模块级中间件仅作用于该模块内路由。
+
+~~~go
+r.Module("admin", func(m t.Router) {
+    m.Use(adminMiddleware)          // 仅 admin 模块生效
+    m.GET("/user", listUser)        // → /admin/user
+    m.POST("/user", createUser)     // → /admin/user
+})
+~~~
+
+`Module` 等价于 `Group("/admin", ...)`，区别在于语义清晰——调用处明确这是一个模块边界，
+便于多人协作时按模块拆分路由文件。

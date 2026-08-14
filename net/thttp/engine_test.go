@@ -53,6 +53,55 @@ func TestEngineOwnsStartupOutput(t *testing.T) {
 	}
 }
 
+// TestUseOrderedPriority 验证 UseOrdered 按优先级升序排列中间件（同级保序）。
+func TestUseOrderedPriority(t *testing.T) {
+	e := NewWithApp(core.NewApp())
+	var order []string
+	mw := func(name string) core.Handler {
+		return func(c *core.Ctx) {
+			order = append(order, name)
+			c.Next()
+		}
+	}
+	// 故意乱序注册：Log(50) / Auth(100) / Recover(0)
+	e.Router().UseOrdered(
+		PrioritizedMiddleware{H: mw("log"), Priority: 50},
+		PrioritizedMiddleware{H: mw("auth"), Priority: 100},
+		PrioritizedMiddleware{H: mw("recover"), Priority: 0},
+	)
+	e.Router().GET("/ok", func(c *core.Ctx) { c.String("ok") })
+
+	do(e, "GET", "/ok", "")
+	want := []string{"recover", "log", "auth"}
+	if fmt.Sprintf("%v", order) != fmt.Sprintf("%v", want) {
+		t.Fatalf("middleware execution order = %v, want %v", order, want)
+	}
+}
+
+// TestUseOrderedStableWithinSamePriority 验证同级优先级保持注册顺序。
+func TestUseOrderedStableWithinSamePriority(t *testing.T) {
+	e := NewWithApp(core.NewApp())
+	var order []string
+	mw := func(name string) core.Handler {
+		return func(c *core.Ctx) {
+			order = append(order, name)
+			c.Next()
+		}
+	}
+	e.Router().UseOrdered(
+		PrioritizedMiddleware{H: mw("a"), Priority: 10},
+		PrioritizedMiddleware{H: mw("b"), Priority: 10},
+		PrioritizedMiddleware{H: mw("c"), Priority: 5},
+	)
+	e.Router().GET("/ok", func(c *core.Ctx) { c.String("ok") })
+
+	do(e, "GET", "/ok", "")
+	want := []string{"c", "a", "b"}
+	if fmt.Sprintf("%v", order) != fmt.Sprintf("%v", want) {
+		t.Fatalf("middleware execution order = %v, want %v", order, want)
+	}
+}
+
 func TestStartupURL(t *testing.T) {
 	// schemeURL 是启动日志的地址拼装契约：绑定 0.0.0.0/:: 时仍由 printStartup
 	// 在外面拼 localhost + 局域网地址多行输出，这里只测单地址拼装。

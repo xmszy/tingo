@@ -24,6 +24,15 @@ type HandlerE func(*Ctx) error
 // Middleware 是中间件类型，等同于 Handler。
 type Middleware = Handler
 
+// WeightedMiddleware 是带优先级的中间件。
+//
+// 数值越小越先执行（全局 -> 模块 -> 控制器 -> 动作 由小到大注册）。
+// 同级按注册顺序。通过 Router.UseOrdered 注册。
+type WeightedMiddleware struct {
+	H        Handler
+	Priority int
+}
+
 /* ------------------------------------------------------------------ */
 /* 零成本转换                                                           */
 /* ------------------------------------------------------------------ */

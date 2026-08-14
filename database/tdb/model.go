@@ -90,7 +90,24 @@ type Model[T any] struct {
 	ctx context.Context
 	// 强制走主库读（读写分离场景下，默认读走从库；事务内自动走主库）。
 	useMaster bool
+
+	// 查询作用域，在查询执行前自动应用。
+	scopes []ScopeFunc[T]
 }
+
+// ScopeFunc 是查询作用域函数：接收当前模型，返回附加了查询条件的新模型。
+//
+// 用法：
+//
+//	func OnlyActive(m *tdb.Model[User]) *tdb.Model[User] {
+//	    return m.Where("status", 1)
+//	}
+//	func Recent(m *tdb.Model[User]) *tdb.Model[User] {
+//	    return m.Order("id desc")
+//	}
+//
+//	users, _ := db.Model[User]().Scopes(OnlyActive, Recent).All()
+type ScopeFunc[T any] func(*Model[T]) *Model[T]
 
 // AutoTimestamp 启用自动时间戳（列名为蛇形，如 "create_time"、"update_time"）。
 //
@@ -144,6 +161,20 @@ func (m *Model[T]) WithAll(loaders map[string]preloader) *Model[T] {
 		model.preloads = append(model.preloads, preloadEntry{name: name, preloader: loader})
 	}
 	return model
+}
+
+// Together 级联/聚合模式标记。tingo 的预加载底层已采用「一次 IN 查询聚合所有父记录」
+// 的批量策略（等价于 gf 的 together 模式），故 Together() 不改变执行行为，仅作为
+// 链式可读性标记与 API 对齐存在。
+//
+// 典型用法（与 WithCount/WithSum 组合）：
+//
+//	q := db.Model[User]().
+//	    With("Orders", tdb.HasMany[User, Order]("id", "user_id")).
+//	    Together()
+//	users, _ := q.All()
+func (m *Model[T]) Together() *Model[T] {
+	return m.getModel()
 }
 
 // WithTrashed 查询时包含已软删除的记录。
@@ -260,7 +291,41 @@ func (m *Model[T]) Clone() *Model[T] {
 	}
 	c.ctx = m.ctx
 	c.useMaster = m.useMaster
+	if len(m.scopes) > 0 {
+		c.scopes = append([]ScopeFunc[T](nil), m.scopes...)
+	}
 	return c
+}
+
+// Scopes 追加一个或多个查询作用域。
+// 作用域在查询执行（All/Find/One/Paginate 等）前按注册顺序应用。
+//
+// 用法：
+//
+//	users, _ := db.Model[User]().Scopes(OnlyActive, Recent).All()
+func (m *Model[T]) Scopes(fns ...ScopeFunc[T]) *Model[T] {
+	model := m.getModel()
+	model.scopes = append(model.scopes, fns...)
+	return model
+}
+
+// Scope 追加单个查询作用域，等价于 Scopes(fn)。
+func (m *Model[T]) Scope(fn ScopeFunc[T]) *Model[T] {
+	return m.Scopes(fn)
+}
+
+// applyScopes 在执行查询前应用已注册的作用域，返回应用后的模型副本。
+// 已应用的作用域被清空，避免重复应用。若未注册任何作用域则原样返回。
+func (m *Model[T]) applyScopes() *Model[T] {
+	if len(m.scopes) == 0 {
+		return m
+	}
+	mm := m.Clone()
+	mm.scopes = nil // 防止作用域函数体内再次触发
+	for _, fn := range m.scopes {
+		mm = fn(mm)
+	}
+	return mm
 }
 
 // tableNameOf 从类型推断表名（导出，供 relation 包内使用）。
@@ -306,6 +371,10 @@ func (m *Model[T]) Ctx(ctx context.Context) *Model[T] {
 	model.ctx = ctx
 	return model
 }
+
+// DB 返回底层数据库句柄。用于执行原生 SQL 逃生舱（如 DB().Exec / DB().Query），
+// 或调用未封装的能力。注意：直接操作 DB 会绕开 Model 的钩子/事件/软删除过滤。
+func (m *Model[T]) DB() *DB { return m.db }
 
 // Master 强制本次查询走主库（读写分离场景下，默认 SELECT 走从库）。
 // 适用于刚写入后需立即读到的强一致场景。返回新的 Model 副本。

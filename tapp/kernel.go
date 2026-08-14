@@ -156,6 +156,14 @@ func (k *Kernel) Boot(container *core.Container) error {
 		}
 	}
 
+	// 容器服务绑定完成后，对全局登记的控制器执行字段依赖注入。
+	// 放在 services 注册之前，使服务可注入已经装配好的依赖。
+	for _, ctrl := range RegisteredControllers() {
+		if err := Inject(container, ctrl); err != nil {
+			return err
+		}
+	}
+
 	// 按 Priority 升序执行，未实现 Prioritized 的服务视为 0。
 	sortServices(services)
 

@@ -37,6 +37,31 @@ func Req(c *core.Ctx) Request { return Request{c: c} }
 // Ctx 返回底层上下文。
 func (r Request) Ctx() *core.Ctx { return r.c }
 
+// Validate 校验结构体。
+//
+// 先尝试将本次请求数据绑定到 v（v 必须为指针），再按场景校验：
+//   - 无 scene 时按 struct tag 规则校验；
+//   - 传入 scene 时按对应场景规则校验（覆盖 tag 上的 scene 约束）。
+//
+// 校验失败返回 errors.ErrValidation 派生的结构化错误，可用 errors.AsValidationErr 解析。
+//
+// 用法：
+//
+//	var req LoginReq
+//	if err := req.Validate(&req); err != nil {
+//	    return err
+//	}
+//	// 按场景：
+//	if err := req.Validate(&req, "create"); err != nil {
+//	    return err
+//	}
+func (r Request) Validate(v any, scene ...string) error {
+	if err := r.c.Bind(v); err != nil {
+		return err
+	}
+	return DefaultValidator().CheckStruct(v, scene...)
+}
+
 // parseJSONBody 懒解析 JSON 请求体（仅首次调用时解析）。
 //
 // 检测 Content-Type 中是否包含 json，若是则用 json.Unmarshal 解析。

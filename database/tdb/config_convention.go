@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/xmszy/tingo/os/tcfg"
 )
@@ -28,9 +29,11 @@ type ConnectionConfig struct {
 	Charset  string `json:"charset"`
 	Prefix   string `json:"prefix"`
 	Schema   string `json:"schema"`
-	MaxOpen  int    `json:"max_open"`
-	MaxIdle  int    `json:"max_idle"`
-	ReadOnly bool   `json:"read_only"`
+	MaxOpen         int           `json:"max_open"`
+	MaxIdle         int           `json:"max_idle"`
+	ConnMaxLifetime time.Duration `json:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `json:"conn_max_idle_time"`
+	ReadOnly        bool          `json:"read_only"`
 }
 
 // ConfigFromTree 从分层配置树的 database 命名空间解码数据库配置。
@@ -108,7 +111,9 @@ func (c ConnectionConfig) resolve() (Config, error) {
 	}
 	return Config{
 		Driver: driver, Dialect: driver, DSN: dsn, Schema: c.Schema, Prefix: c.Prefix,
-		MaxOpen: c.MaxOpen, MaxIdle: c.MaxIdle, ReadOnly: c.ReadOnly,
+		MaxOpen: c.MaxOpen, MaxIdle: c.MaxIdle,
+		ConnMaxLifetime: c.ConnMaxLifetime, ConnMaxIdleTime: c.ConnMaxIdleTime,
+		ReadOnly: c.ReadOnly,
 	}, nil
 }
 

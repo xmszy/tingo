@@ -117,3 +117,51 @@ func (u *User) Save(c *t.Ctx) error {
     return u.svc.Create(&input)
 }
 ~~~
+
+## 结构体标签场景校验
+
+`os/tvalid` 支持在结构体字段上用 `valid` 与 `valid-{scene}` 标签声明规则，对标 Tingo 的验证场景：
+
+~~~go
+type UserReq struct {
+    Id   int    `valid:"integer" valid-update:"require|integer"`
+    Name string `valid:"require|length:2,20" json:"name"`
+    Age  int    `valid:"integer|between:1,120"`
+}
+
+func (u *User) Save(c *t.Ctx) error {
+    var req UserReq
+    // 创建场景：使用 valid 标签
+    if err := u.BindValidate(c, &req); err != nil {
+        return err
+    }
+    // 更新场景：使用 valid-update 标签覆盖 Id 规则
+    // if err := u.BindValidate(c, &req, "update"); err != nil { ... }
+    return u.svc.Create(&req)
+}
+~~~
+
+- `valid`：通用规则，所有场景生效
+- `valid-{scene}`：仅当指定场景时生效（如 `valid-update` 在 `BindValidate(c, &req, "update")` 时生效）
+- 场景标签与通用标签**合并**生效
+
+## 统一校验器（tapp.Validator）
+
+控制器与绑定层都走 `tapp.DefaultValidator()`，校验器可替换（对标 Tingo 的 `Validate` 驱动切换）：
+
+~~~go
+// 业务装配期注入自定义校验器
+tapp.SetDefaultValidator(myValidator)
+
+// 控制器里直接调用，无需关心底层实现
+func (u *User) Save(c *t.Ctx) error {
+    var req UserReq
+    if err := tapp.Req(c).Validate(&req); err != nil {
+        return err
+    }
+    return u.svc.Create(&req)
+}
+~~~
+
+`Request.Validate` 与 `thttp.BindAndValid` 均通过 `tapp.DefaultValidator().CheckStruct` 执行，
+因此切换校验驱动（如接入 `tingo-contrib/validate`）只需一行 `SetDefaultValidator`。

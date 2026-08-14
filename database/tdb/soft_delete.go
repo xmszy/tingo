@@ -9,7 +9,9 @@ import (
 // SoftDeleter 软删除接口 —— Model embed 该字段后即启用软删除。
 //
 // 当 Delete() 被调用时，如果目标实体实现了 SoftDeleter 接口，
-// 则 tdb 会自动将 DELETE 转换为 UPDATE SET deleted_at = NOW()。
+// 则 tdb 会自动将 DELETE 转换为 UPDATE SET deleted_at = <当前时间>。
+// time 类型优先使用方言的 Now() 表达式（服务端时间），未实现 NowDialect 的
+// 自定义方言回退为绑定 time.Now() 参数；int 类型始终绑定 Unix 秒参数。
 // 同时，所有 SELECT 查询会自动追加 WHERE deleted_at IS NULL。
 //
 // 用法示例：
@@ -65,36 +67,49 @@ func (s SoftDeleteInt) Time() time.Time { return time.Unix(int64(s), 0) }
 
 // ──────────────── 通用检测 ────────────────
 
-// softDeleteField 检查值中是否存在 SoftDelete/SoftDeleteInt 字段，返回其列名与类型。
-func softDeleteField(t reflect.Type) (string, bool) {
+// softDeleteField 检查值中是否存在 SoftDelete/SoftDeleteInt 字段，返回其列名、值类型与是否命中。
+// kind 取值："time"（SoftDelete，time.Time 语义）或 "int"（SoftDeleteInt，Unix 秒 int64 语义）。
+func softDeleteField(t reflect.Type) (col string, kind string, ok bool) {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if f.PkgPath != "" {
 			continue
 		}
 		ft := f.Type
-		if ft == reflect.TypeFor[SoftDelete]() || ft == reflect.TypeFor[*SoftDelete]() ||
-			ft == reflect.TypeFor[SoftDeleteInt]() || ft == reflect.TypeFor[*SoftDeleteInt]() {
-			col := columnOf(f)
-			if col != "" {
-				return col, true
-			}
+		col = columnOf(f)
+		if col == "" {
+			continue
+		}
+		switch ft {
+		case reflect.TypeFor[SoftDelete](), reflect.TypeFor[*SoftDelete]():
+			return col, "time", true
+		case reflect.TypeFor[SoftDeleteInt](), reflect.TypeFor[*SoftDeleteInt]():
+			return col, "int", true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
-// hasSoftDelete 检查指针/结构体是否包含软删除字段。
-func hasSoftDelete(v any) (string, bool) {
+// hasSoftDelete 检查指针/结构体是否包含软删除字段，返回其列名、值类型与是否命中。
+func hasSoftDelete(v any) (col string, kind string, ok bool) {
 	rt := reflect.TypeOf(v)
 	for rt != nil && rt.Kind() == reflect.Pointer {
 		rt = rt.Elem()
 	}
 	if rt == nil || rt.Kind() != reflect.Struct {
-		return "", false
+		return "", "", false
 	}
-	col := metaFor(rt).softDeleteCol
-	return col, col != ""
+	m := metaFor(rt)
+	if m.softDeleteCol == "" {
+		return "", "", false
+	}
+	// 列名已缓存，但需回查字段类型以确定 time/int 语义。
+	c, k, _ := softDeleteField(rt)
+	if c == "" {
+		// 退化保护：仅列名已知而无类型（理论上不会发生），默认按 time 处理。
+		return m.softDeleteCol, "time", true
+	}
+	return c, k, true
 }
 
 // softDeleteWhere 生成软删除过滤条件。

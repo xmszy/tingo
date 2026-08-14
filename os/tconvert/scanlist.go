@@ -62,7 +62,7 @@ func ScanList(dst, src any, fieldName, primaryKey, foreignKey string) error {
 	}
 
 	// 填充目标
-	for i := 0; i < dstLen; i++ {
+	for i := range dstLen {
 		dstItem := dstSlice.Index(i)
 		if dstItem.Kind() == reflect.Pointer {
 			if dstItem.IsNil() {
