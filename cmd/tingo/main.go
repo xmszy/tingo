@@ -11,7 +11,7 @@
 //   - route:list               列出所有已注册路由
 //   - serve [--addr :8080]     等价于 run（别名）
 //   - test [args...]           运行当前项目测试
-//   - clean                    清理构建产物（bin/、*.test）
+//   - clean                    清理构建产物（根目录可执行文件、*.test、runtime/log）
 //
 // 用法示例：
 //

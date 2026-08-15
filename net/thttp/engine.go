@@ -510,9 +510,6 @@ func (e *Engine) ShutdownContext(ctx context.Context) error {
 
 // printStartup 打印服务已就绪信息。
 func (e *Engine) printStartup(boundAddr net.Addr, elapsed time.Duration) {
-	if !isDebug() && !e.cfg.PrintRoutes {
-		return
-	}
 	fmt.Fprintf(os.Stdout, "\n[TINGO] mode=%s\n", ginModeFromEnv())
 	if e.cfg.PrintRoutes {
 		for _, route := range e.Routes() {

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -17,6 +18,22 @@ import (
 	"github.com/xmszy/tingo/net/thttp"
 	"github.com/xmszy/tingo/os/tenv"
 )
+
+// toolLogDir 是 tingo 工具链日志目录（与框架运行时日志 runtime/log 一致）。
+const toolLogDir = "runtime/log"
+
+// openToolLog 以追加模式打开工具链日志文件 name（位于 runtime/log 下），
+// 并确保目录存在。打开失败返回 nil（日志为可选能力，不影响主流程）。
+func openToolLog(name string) *os.File {
+	if err := os.MkdirAll(toolLogDir, 0o755); err != nil {
+		return nil
+	}
+	f, err := os.OpenFile(filepath.Join(toolLogDir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil
+	}
+	return f
+}
 
 // 热重载快照（首次调用建立基准）。
 var (
@@ -36,7 +53,7 @@ func buildCmd(args []string) {
 编译当前项目为可执行文件。
 
 选项:
-  --output <dir>     输出目录（默认 bin）
+  --output <dir>     输出目录（默认当前目录，不单独创建 bin/）
   --name <name>      可执行文件名（默认取模块名或目录名）
   --ldflags <args>   传给 go build -ldflags 的参数
   --platform <os/arch>  交叉编译目标，如 linux/amd64
@@ -44,7 +61,7 @@ func buildCmd(args []string) {
   -h, --help         打印本帮助
 `)
 	}
-	outDir := fs.String("output", "bin", "输出目录")
+	outDir := fs.String("output", ".", "输出目录（默认当前目录）")
 	name := fs.String("name", "", "可执行文件名（默认取模块名或目录名）")
 	ldflags := fs.String("ldflags", "", "传给 go build -ldflags 的参数")
 	platform := fs.String("platform", "", "交叉编译目标，格式 GOOS/GOARCH，如 linux/amd64")
@@ -81,10 +98,27 @@ func buildCmd(args []string) {
 		}
 	}
 	fmt.Printf("building %s ...\n", out)
+
+	// 构建日志同时落盘到 runtime/log/tingo-build.log，便于事后追溯
+	// 构建报错、链接失败、溢出（stack overflow / OOM）等问题。
+	logFile := openToolLog("tingo-build.log")
+	if logFile != nil {
+		defer logFile.Close()
+		cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+		cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+		fmt.Fprintf(logFile, "\n[%s] tingo build %s\n", time.Now().Format("2006-01-02 15:04:05"), out)
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 	if err := cmd.Run(); err != nil {
+		if logFile != nil {
+			fmt.Fprintf(logFile, "[%s] build failed: %v\n", time.Now().Format("2006-01-02 15:04:05"), err)
+		}
 		fmt.Fprintf(os.Stderr, "构建失败: %v\n", err)
 		os.Exit(1)
 	}
+	fmt.Fprintf(logFile, "[%s] built: %s\n", time.Now().Format("2006-01-02 15:04:05"), out)
 	fmt.Printf("built: %s\n", out)
 
 	if *docker {
@@ -169,11 +203,28 @@ func runCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "创建目录失败: %v\n", err)
 		os.Exit(1)
 	}
+
+	// 运行日志落盘到 runtime/log/tingo-run.log，便于事后追溯运行时问题
+	// （panic、stack overflow、OOM、端口占用等构建期无法暴露的异常）。
+	logFile := openToolLog("tingo-run.log")
+	if logFile != nil {
+		defer logFile.Close()
+		fmt.Fprintf(logFile, "\n[%s] tingo run -> %s\n", time.Now().Format("2006-01-02 15:04:05"), out)
+	}
+
 	build := exec.Command("go", "build", "-o", out, ".")
-	build.Stdout = os.Stdout
-	build.Stderr = os.Stderr
+	if logFile != nil {
+		build.Stdout = io.MultiWriter(os.Stdout, logFile)
+		build.Stderr = io.MultiWriter(os.Stderr, logFile)
+	} else {
+		build.Stdout = os.Stdout
+		build.Stderr = os.Stderr
+	}
 	fmt.Println("building ...")
 	if err := build.Run(); err != nil {
+		if logFile != nil {
+			fmt.Fprintf(logFile, "[%s] build failed: %v\n", time.Now().Format("2006-01-02 15:04:05"), err)
+		}
 		fmt.Fprintf(os.Stderr, "构建失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -187,13 +238,22 @@ func runCmd(args []string) {
 		listen = v
 	}
 	listen = thttp.ResolveAddr(listen)
-	fmt.Printf("serving on http://localhost:%s (Ctrl+C 退出)\n", listenAddrURL(listen))
 	run := exec.Command(out)
+	// 启动横幅由框架 printStartup 统一打印（含 localhost/LAN 地址与耗时），
+	// 与 go run 输出的 [TINGO] ... 格式一致，无需在此重复打印。
 	run.Env = append(os.Environ(), "TINGO_ADDR="+listen)
-	run.Stdout = os.Stdout
-	run.Stderr = os.Stderr
+	if logFile != nil {
+		run.Stdout = io.MultiWriter(os.Stdout, logFile)
+		run.Stderr = io.MultiWriter(os.Stderr, logFile)
+	} else {
+		run.Stdout = os.Stdout
+		run.Stderr = os.Stderr
+	}
 	run.Stdin = os.Stdin
 	if err := run.Run(); err != nil {
+		if logFile != nil {
+			fmt.Fprintf(logFile, "[%s] exit: %v\n", time.Now().Format("2006-01-02 15:04:05"), err)
+		}
 		if exit, ok := err.(*exec.ExitError); ok {
 			os.Exit(exit.ExitCode())
 		}
@@ -222,6 +282,14 @@ func watchRun(addr, outDir string) {
 	listen = thttp.ResolveAddr(listen)
 	var proc *exec.Cmd
 
+	// 运行日志落盘到 runtime/log/tingo-run.log，整个 watch 会话共用，
+	// 便于事后追溯运行时问题（panic、stack overflow、OOM 等）。
+	logFile := openToolLog("tingo-run.log")
+	if logFile != nil {
+		defer logFile.Close()
+		fmt.Fprintf(logFile, "\n[%s] tingo run --watch -> %s\n", time.Now().Format("2006-01-02 15:04:05"), out)
+	}
+
 	start := func() bool {
 		if proc != nil {
 			_ = proc.Process.Kill()
@@ -229,21 +297,36 @@ func watchRun(addr, outDir string) {
 		}
 		fmt.Println("building ...")
 		build := exec.Command("go", "build", "-o", out, ".")
-		build.Stdout = os.Stdout
-		build.Stderr = os.Stderr
+		if logFile != nil {
+			build.Stdout = io.MultiWriter(os.Stdout, logFile)
+			build.Stderr = io.MultiWriter(os.Stderr, logFile)
+		} else {
+			build.Stdout = os.Stdout
+			build.Stderr = os.Stderr
+		}
 		if err := build.Run(); err != nil {
+			if logFile != nil {
+				fmt.Fprintf(logFile, "[%s] build failed: %v\n", time.Now().Format("2006-01-02 15:04:05"), err)
+			}
 			fmt.Fprintf(os.Stderr, "构建失败: %v\n", err)
 			return false
 		}
 		proc = exec.Command(out)
 		proc.Env = append(os.Environ(), "TINGO_ADDR="+listen)
-		proc.Stdout = os.Stdout
-		proc.Stderr = os.Stderr
+		if logFile != nil {
+			proc.Stdout = io.MultiWriter(os.Stdout, logFile)
+			proc.Stderr = io.MultiWriter(os.Stderr, logFile)
+		} else {
+			proc.Stdout = os.Stdout
+			proc.Stderr = os.Stderr
+		}
 		if err := proc.Start(); err != nil {
+			if logFile != nil {
+				fmt.Fprintf(logFile, "[%s] start failed: %v\n", time.Now().Format("2006-01-02 15:04:05"), err)
+			}
 			fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 			return false
 		}
-		fmt.Printf("serving on http://localhost:%s (Ctrl+C 退出，文件变更自动重载)\n", listenAddrURL(listen))
 		return true
 	}
 
@@ -272,24 +355,6 @@ func watchRun(addr, outDir string) {
 			}
 		}
 	}
-}
-
-// listenAddrURL 把监听地址（如 :8080、0.0.0.0:8080、127.0.0.1:8080）转成
-// 可点击的 localhost URL 片段（如 8080），便于在启动日志里拼接成
-// http://localhost:8080。LAN 地址由框架自身另行打印。
-func listenAddrURL(listen string) string {
-	listen = strings.TrimSpace(listen)
-	if listen == "" {
-		return "8080"
-	}
-	if strings.HasPrefix(listen, ":") {
-		return strings.TrimPrefix(listen, ":")
-	}
-	// 含 host:port 时只取端口部分，统一用 localhost 作为可点击入口。
-	if idx := strings.LastIndex(listen, ":"); idx >= 0 {
-		return listen[idx+1:]
-	}
-	return listen
 }
 
 // changed 返回自上次快照以来项目内 .go 源文件是否发生变更（排除 _test.go 与 vendor）。
@@ -368,34 +433,37 @@ func cleanCmd(args []string) {
 	fs.Usage = func() {
 		fmt.Print(`用法: tingo clean
 
-清理构建产物（bin/、runtime/logs、根目录下的 *.exe 与 *.test 文件）。
+清理构建产物（根目录下的可执行文件与 *.test、runtime/log 日志）。
 选项:
   -h, --help   打印本帮助
 `)
 	}
 	fs.Parse(args)
 
-	targets := []string{"bin", "runtime/logs"}
-	for _, t := range targets {
-		if _, err := os.Stat(t); err == nil {
-			if err := os.RemoveAll(t); err != nil {
-				fmt.Fprintf(os.Stderr, "清理 %s 失败: %v\n", t, err)
-				os.Exit(1)
-			}
-			fmt.Printf("removed %s\n", t)
-		}
-	}
-	// 删除根目录下的可执行文件与测试二进制。
+	// 删除根目录下的可执行文件与测试二进制（tingo build 默认输出到当前目录）。
+	mod, _ := modulePathOf(".")
+	binName := binaryName(modBase(mod))
 	entries, _ := os.ReadDir(".")
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		n := e.Name()
-		if strings.HasSuffix(n, ".test") || strings.HasSuffix(n, ".exe") {
+		switch {
+		case n == binName,
+			strings.HasSuffix(n, ".test"),
+			strings.HasSuffix(n, ".exe"):
 			_ = os.Remove(n)
 			fmt.Printf("removed %s\n", n)
 		}
+	}
+	// 清理 tingo 与框架的运行时日志（runtime/log）。
+	if _, err := os.Stat(toolLogDir); err == nil {
+		if err := os.RemoveAll(toolLogDir); err != nil {
+			fmt.Fprintf(os.Stderr, "清理 %s 失败: %v\n", toolLogDir, err)
+			os.Exit(1)
+		}
+		fmt.Printf("removed %s\n", toolLogDir)
 	}
 	fmt.Println("clean done")
 }

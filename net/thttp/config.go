@@ -84,11 +84,6 @@ func ginModeFromEnv() string {
 	return gin.ReleaseMode
 }
 
-// isDebug 返回是否处于调试模式。
-func isDebug() bool {
-	return tenv.Get("APP_DEBUG", false)
-}
-
 /* ------------------------------------------------------------------ */
 /* Options 函数式配置                                                   */
 /* ------------------------------------------------------------------ */
