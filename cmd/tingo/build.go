@@ -55,6 +55,7 @@ func buildCmd(args []string) {
 选项:
   --output <dir>     输出目录（默认当前目录，不单独创建 bin/）
   --name <name>      可执行文件名（默认取模块名或目录名）
+  -o, -O <name>      可执行文件名（同 --name）
   --ldflags <args>   传给 go build -ldflags 的参数
   --platform <os/arch>  交叉编译目标，如 linux/amd64
   --docker           生成 Dockerfile（配合 --platform 使用）
@@ -63,6 +64,8 @@ func buildCmd(args []string) {
 	}
 	outDir := fs.String("output", ".", "输出目录（默认当前目录）")
 	name := fs.String("name", "", "可执行文件名（默认取模块名或目录名）")
+	oflag := fs.String("o", "", "可执行文件名（同 --name）")
+	Oflag := fs.String("O", "", "可执行文件名（同 --name）")
 	ldflags := fs.String("ldflags", "", "传给 go build -ldflags 的参数")
 	platform := fs.String("platform", "", "交叉编译目标，格式 GOOS/GOARCH，如 linux/amd64")
 	docker := fs.Bool("docker", false, "生成 Dockerfile（配合 --platform 使用）")
@@ -70,6 +73,12 @@ func buildCmd(args []string) {
 
 	mod, _ := modulePathOf(".")
 	binName := *name
+	if binName == "" {
+		binName = *oflag
+	}
+	if binName == "" {
+		binName = *Oflag
+	}
 	if binName == "" {
 		binName = modBase(mod)
 	}
